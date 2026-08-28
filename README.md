@@ -39,7 +39,7 @@ $CLI install-service      # launchd agent: bridge runs at login and restarts if 
 launchctl load -w ~/Library/LaunchAgents/com.claudedeck.bridge.plist
 $CLI setup-stt large-v3-turbo   # optional dictation (brew install whisper-cpp first)
 
-source scripts/claude-tmux.sh   # add to ~/.zshrc: every `claude` now runs in its own tmux pane
+source scripts/claude-tmux.sh   # add to ~/.zshrc: every `claude` now runs in its own tmux pane (dies with its tab; CLAUDEDECK_PERSIST=1 keeps it)
 $CLI qr                   # QR → scan in the Even App (Even Hub tab → developer section → Scan QR)
 ```
 
