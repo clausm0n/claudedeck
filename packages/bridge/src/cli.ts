@@ -3,8 +3,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
-import qrcode from 'qrcode-terminal'
-import { CONFIG_PATH, MODELS_DIR, loadConfig, saveConfig } from './config.js'
+import QRCode from 'qrcode'
+import { CONFIG_DIR, CONFIG_PATH, MODELS_DIR, loadConfig, saveConfig } from './config.js'
 import { SessionRegistry } from './sessions.js'
 import { startServer } from './server.js'
 import { installHooks, uninstallHooks, HOOK_EVENTS } from './hooks-install.js'
@@ -20,7 +20,7 @@ const HELP = `claudedeck — bridge between Claude Code sessions and the G2 glas
   claudedeck uninstall-hooks       remove them again
   claudedeck info                  print connection details for the glasses app
   claudedeck url [--copy]          best bridge URL for the app (wss:// when Tailscale Serve fronts the bridge); --copy → clipboard
-  claudedeck pair [--lan|--ts]     QR code that the installed app scans (phone page → Scan QR) to add this bridge
+  claudedeck pair [--open]         QR code the installed app scans (phone page → Scan QR); --open shows a crisp one in the browser
   claudedeck token [--rotate]      print (or rotate) the shared secret
   claudedeck setup-stt [model]     download a whisper.cpp model (default: base.en)
   claudedeck install-service       create a launchd agent so the bridge runs at login (macOS)
@@ -132,11 +132,19 @@ async function main(): Promise<void> {
       const { url, serve } = bestUrl(cfg, rest)
       // The installed app decodes this with its camera (phone page → Scan QR).
       const payload = `claudedeck://add?name=${encodeURIComponent(cfg.machine)}&url=${encodeURIComponent(url)}`
-      console.log(`\nPairing QR for ${cfg.machine} — open ClaudeDeck on the phone, tap "Scan QR", point the camera here.\n`)
-      qrcode.setErrorLevel('M')
-      qrcode.generate(payload, { small: true }, (qr: string) => console.log(qr))
+      const svgPath = path.join(CONFIG_DIR, 'pair.svg')
+      const svg = await QRCode.toString(payload, { type: 'svg', errorCorrectionLevel: 'M', margin: 3 })
+      fs.writeFileSync(svgPath, svg, { mode: 0o600 })
+      if (rest.includes('--open')) {
+        const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open'
+        const r = spawnSync(opener, [svgPath], { stdio: 'ignore' })
+        console.log(r.error ? `could not open ${svgPath}: ${r.error.message}` : `Opened ${svgPath} — scan it from the browser window (phone page → Scan QR).`)
+      } else {
+        console.log(`\nPairing QR for ${cfg.machine} — open ClaudeDeck on the phone, tap "Scan QR", point the camera here.\n`)
+        console.log(await QRCode.toString(payload, { type: 'terminal', small: true, errorCorrectionLevel: 'M' }))
+        console.log(`Camera struggling with the terminal rendering? \`claudedeck pair --open\` shows a crisp one (${svgPath}).`)
+      }
       console.log(`${url.replace(/token=.*/, 'token=…')}${serve ? '' : '   (plain ws:// — see `claudedeck url` for TLS)'}`)
-      console.log('Too small to scan? Zoom the terminal (Cmd +) or use `claudedeck url --copy` and paste on the phone.\n')
       return
     }
     case 'qr': {

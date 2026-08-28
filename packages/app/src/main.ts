@@ -49,25 +49,47 @@ let hostBridge: EvenAppBridge | null = null
 async function scanQr(): Promise<string | null> {
   if (!hostBridge) throw new Error('Even host not ready yet')
   const shot = await hostBridge.captureImageFromCamera()
-  if (!shot?.base64) return null
+  if (!shot) return null
+  if (!shot.base64) throw new Error(`camera returned no image data (${shot.mimeType || 'unknown type'}, ${shot.size} bytes, path ${shot.path || '-'})`)
   const img = new Image()
   img.src = shot.base64.startsWith('data:') ? shot.base64 : `data:${shot.mimeType || 'image/jpeg'};base64,${shot.base64}`
-  await img.decode()
+  try {
+    await img.decode()
+  } catch {
+    throw new Error(`cannot decode the photo (${shot.mimeType || 'unknown type'}, ${Math.round(shot.base64.length / 1024)} KB)`)
+  }
+  phone.log(`photo ${img.naturalWidth}x${img.naturalHeight} ${shot.mimeType || ''} ${Math.round(shot.base64.length * 0.75 / 1024)} KB — decoding`)
   const canvas = document.createElement('canvas')
   const ctx2d = canvas.getContext('2d', { willReadFrequently: true })
   if (!ctx2d) throw new Error('no canvas')
-  // Try a downscaled pass first (fast, tolerant of blur), then near full size.
-  for (const maxDim of [1000, 1800]) {
-    const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight))
-    canvas.width = Math.round(img.naturalWidth * scale)
-    canvas.height = Math.round(img.naturalHeight * scale)
-    ctx2d.drawImage(img, 0, 0, canvas.width, canvas.height)
+  const w = img.naturalWidth
+  const h = img.naturalHeight
+  // Several sizes (screen photos alias badly at some scales), full frame then a
+  // centre crop — the code is usually in the middle of the frame.
+  const attempts: Array<{ crop: number; maxDim: number }> = [
+    { crop: 1, maxDim: 800 },
+    { crop: 1, maxDim: 1200 },
+    { crop: 1, maxDim: 1700 },
+    { crop: 0.6, maxDim: 1400 },
+    { crop: 0.4, maxDim: 1400 },
+  ]
+  for (const { crop, maxDim } of attempts) {
+    const sw = Math.round(w * crop)
+    const sh = Math.round(h * crop)
+    const sx = Math.round((w - sw) / 2)
+    const sy = Math.round((h - sh) / 2)
+    const scale = Math.min(1, maxDim / Math.max(sw, sh))
+    canvas.width = Math.max(1, Math.round(sw * scale))
+    canvas.height = Math.max(1, Math.round(sh * scale))
+    ctx2d.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
     const data = ctx2d.getImageData(0, 0, canvas.width, canvas.height)
     const hit = jsQR(data.data, data.width, data.height, { inversionAttempts: 'attemptBoth' })
-    if (hit?.data) return hit.data
-    if (scale === 1) break
+    if (hit?.data) {
+      phone.log(`QR found (crop ${crop}, ${canvas.width}x${canvas.height})`)
+      return hit.data
+    }
   }
-  throw new Error('no QR code found in the photo — get closer, avoid glare, zoom the terminal (Cmd +)')
+  throw new Error('no QR code in the photo — fill the frame with the code, hold still, avoid glare; `claudedeck pair --open` gives a crisper code')
 }
 
 const phone = mountPhoneUi(
