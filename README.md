@@ -72,16 +72,28 @@ npm run app:qr -- --lan    # QR pointing at the dev server (+ bridge seeded); --
 npm run app:sim            # evenhub-simulator with automation port 9898
 ```
 
-### Packaging (later)
+### Packaging (installed app instead of dev sideload)
 
-`npm run app:pack` builds `claudedeck.ehpk`. A packaged app must use `wss://`; put the bridge behind Tailscale TLS:
+1. **TLS for the bridge.** A packaged app should talk `wss://`; the simplest front is Tailscale Serve
+   (enable *Serve* + *HTTPS certificates* once in the Tailscale admin console, then on each bridge machine):
 
-```bash
-tailscale serve --bg --https=443 http://127.0.0.1:7788
-# → wss://<machine>.<tailnet>.ts.net/ws?token=...
-```
+   ```bash
+   tailscale serve --bg --https=443 http://127.0.0.1:7788
+   # → wss://<machine>.<tailnet>.ts.net/ws?token=...   (claudedeck info prints it)
+   ```
 
-and list that origin in `packages/app/app.json` → `permissions[network].whitelist` (full origins, no wildcards). The dev sideload (`evenhub qr`) works with plain `ws://`.
+   The proxy connects to the bridge from 127.0.0.1 with `X-Forwarded-For`, so it does **not** get the
+   loopback token bypass — the token in the URL is still required. The phone must run the Tailscale app.
+2. **Whitelist the origins** the app may open in `packages/app/app.json` → `permissions[network].whitelist`
+   (full origins, no wildcards — e.g. `wss://modusbook.tailf19aa8.ts.net`; plain `ws://` LAN/Tailscale-IP
+   entries can stay for dev).
+3. **Build and pack:** `npm run app:pack` → `packages/app/claudedeck.ehpk` (`evenhub login` first if you want
+   `evenhub pack --check` to verify the `package_id`).
+4. **Install:** upload the `.ehpk` at <https://hub.evenrealities.com> (developer portal), then open it from the
+   Even app. A packaged app has no `?bridge=` URL, so add bridges once via the phone page's *Add bridge* form
+   (paste the `wss://` URL from `claudedeck info`); they persist in host storage.
+
+The dev sideload (`evenhub qr`) works with plain `ws://` and needs no TLS.
 
 ## Glasses controls
 

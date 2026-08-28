@@ -61,7 +61,7 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
     res.setHeader('Access-Control-Allow-Headers', '*')
     if (req.method === 'OPTIONS') return void res.writeHead(204).end()
 
-    const local = isLoopback(req.socket.remoteAddress)
+    const local = isLocalRequest(req)
     const token = url.searchParams.get('token') ?? req.headers['x-claudedeck-token']
     const authed = local || token === cfg.token
 
@@ -150,7 +150,7 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
     const url = new URL(req.url ?? '/', 'http://localhost')
     if (url.pathname !== '/ws') return void socket.destroy()
     const token = url.searchParams.get('token')
-    if (token !== cfg.token && !isLoopback(req.socket.remoteAddress)) {
+    if (token !== cfg.token && !isLocalRequest(req)) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
       return void socket.destroy()
     }
@@ -334,6 +334,15 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
 
 function isLoopback(addr?: string): boolean {
   return !!addr && (addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1')
+}
+
+/**
+ * Loopback peer that is not a reverse proxy. `tailscale serve` (the TLS front
+ * for packaged apps) forwards from 127.0.0.1 with X-Forwarded-For set, and
+ * those connections must present the token like any other remote client.
+ */
+function isLocalRequest(req: http.IncomingMessage): boolean {
+  return isLoopback(req.socket.remoteAddress) && !header(req, 'x-forwarded-for')
 }
 
 function header(req: http.IncomingMessage, name: string): string | undefined {

@@ -76,7 +76,15 @@ let micOn = false
 async function mic(on: boolean): Promise<void> {
   if (micOn === on) return
   const ok = await evenBridge.audioControl(on, AudioInputSource.Glasses)
-  if (!ok && on) throw new Error('audioControl refused (check g2-microphone permission)')
+  if (!ok && on) {
+    // The host only hands out the glasses mic after a *successful* startup page
+    // create (SDK README: "Glasses MIC returns false → create the startup page first").
+    throw new Error(
+      created === 0
+        ? 'host refused the glasses mic (g2-microphone permission?)'
+        : `host refused the glasses mic: startup page result ${created} — relaunch the app`,
+    )
+  }
   micOn = on
 }
 

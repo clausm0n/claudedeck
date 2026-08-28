@@ -13,6 +13,7 @@
       "whitelist": [
         "ws://100.77.70.83:7788",
         "wss://modusbook.tailf19aa8.ts.net",
+        "https://modusbook.tailf19aa8.ts.net",
         "ws://192.168.1.119:7788"
       ]
     },
