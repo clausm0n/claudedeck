@@ -39,6 +39,15 @@ else
   echo "(started with nohup; add it to systemd/cron @reboot to survive reboots)"
 fi
 
+echo "== shell wrapper (claude runs inside tmux so the glasses can control it)"
+for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+  [ -f "$rc" ] || continue
+  if ! grep -q 'claude-tmux.sh' "$rc"; then
+    printf '\n# ClaudeDeck: run claude inside tmux so the G2 glasses can control it\n[ -f "%s/scripts/claude-tmux.sh" ] && source "%s/scripts/claude-tmux.sh"\n' "$(pwd)" "$(pwd)" >> "$rc"
+    echo "added to $rc (open a new shell, then launch claude as usual)"
+  fi
+done
+
 echo "== bridge info"
 $CLI info
 echo

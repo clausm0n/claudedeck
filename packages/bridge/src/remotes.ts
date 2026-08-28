@@ -103,7 +103,9 @@ export class RemoteBridge extends EventEmitter {
   private handle(msg: ServerMessage): void {
     switch (msg.type) {
       case 'hello':
-        this.machine = msg.machine || this.name
+        // Keep the name the user gave this remote as the label (the remote's
+        // own hostname is often less meaningful, e.g. "tb5k" for studiom3).
+        this.machine = this.name
         break
       case 'sessions':
         this.sessions = msg.sessions.map(s => ({ ...s, id: this.prefix(s.id), machine: this.machine }))
