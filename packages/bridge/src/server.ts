@@ -99,6 +99,12 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
       )
       return
     }
+    if (url.pathname === '/debug') {
+      if (!local) return void res.writeHead(401).end()
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ path: process.env.PATH, tmux: registry.tmuxAvailable, sessions: registry.dump() }, null, 2))
+      return
+    }
     if (url.pathname === '/sessions') {
       if (!authed) return void res.writeHead(401).end()
       res.writeHead(200, { 'content-type': 'application/json' })

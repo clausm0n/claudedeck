@@ -102,6 +102,16 @@ export class SessionRegistry extends EventEmitter {
     return this.sessions.get(id)
   }
 
+  /** Raw internal state for /debug (loopback only). */
+  dump(): Record<string, unknown>[] {
+    return [...this.sessions.values()].map(s => ({
+      id: s.id, name: s.name, status: s.status, source: s.source, pane: s.pane, pid: s.pid,
+      lastSeenAgo: s.lastSeen ? Math.round((Date.now() - s.lastSeen) / 1000) : null,
+      lastHookAgo: s.lastHookAt ? Math.round((Date.now() - s.lastHookAt) / 1000) : null,
+      paneMisses: s.paneMisses, endedAt: s.endedAt, transcript: s.transcriptPath?.split('/').pop(),
+    }))
+  }
+
   detail(id: string): SessionDetail | undefined {
     const s = this.sessions.get(id)
     if (!s) return undefined
@@ -438,9 +448,13 @@ export class SessionRegistry extends EventEmitter {
         // The pane no longer runs claude (or is gone). Two consecutive misses
         // (the process table is cached) mean the session really exited.
         s.paneMisses = (s.paneMisses ?? 0) + 1
-        if (s.paneMisses >= 2) {
+        if (s.paneMisses >= 3) {
+          // With a known pid the process is authoritative: a pane miss only
+          // means the pane went away (or a transient scan hiccup), not exit.
+          const alive = s.pid !== undefined && pidAlive(s.pid)
+          log(`session ${s.name} (${s.id.slice(0, 8)}): pane ${s.pane} no longer runs claude (claude panes: ${[...paneIds].join(',') || 'none'})${alive ? ', pid alive → pane dropped' : ' → ended'}`)
           s.pane = undefined
-          if (s.source === 'hook' && s.status !== 'ended') {
+          if (!alive && s.source === 'hook' && s.status !== 'ended') {
             s.endedAt = now
             s.tool = undefined
             this.touch(s, 'ended')
@@ -495,6 +509,7 @@ export class SessionRegistry extends EventEmitter {
         const processGone = s.pid !== undefined && !pidAlive(s.pid)
         const silent = s.pid === undefined && !s.pane && !!s.lastSeen && now - s.lastSeen > SILENT_MS
         if (processGone || silent) {
+          log(`session ${s.name} (${s.id.slice(0, 8)}): ${processGone ? `pid ${s.pid} gone` : `silent for ${Math.round((now - (s.lastSeen ?? now)) / 1000)}s`} → ended`)
           s.endedAt = now
           s.tool = undefined
           s.pane = undefined
