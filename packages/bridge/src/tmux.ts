@@ -105,9 +105,17 @@ async function processTable(): Promise<Proc[]> {
 
 const CLAUDE_ARGS = /(^|\/|\s)claude(\s|$)|claude-code|\.claude\/local\/node_modules/
 
-/** True when a `claude` CLI process is running underneath the pane's shell. */
+/**
+ * True when the pane's process is the `claude` CLI or has it underneath.
+ * `tmux new-session "claude"` makes the pane process claude itself (sh execs
+ * it), while typing `claude` into a shell makes it a child — handle both.
+ */
 export async function paneRunsClaude(pane: TmuxPane): Promise<boolean> {
   const procs = await processTable()
+  const self = procs.find(p => p.pid === pane.pid)
+  if (self && CLAUDE_ARGS.test(self.args)) return true
+  // The versioned binary reports its name as e.g. "2.1.251".
+  if (/^\d+\.\d+\.\d+$/.test(pane.command)) return true
   const children = new Map<number, Proc[]>()
   for (const p of procs) {
     const arr = children.get(p.ppid) ?? []
