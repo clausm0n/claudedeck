@@ -114,7 +114,7 @@ export class SessionsScreen implements Screen {
     }
 
     const more = list.length > BODY_LINES ? ` ${this.cursor + 1}/${list.length}` : ''
-    const footer = fit(`swipe: select${more}   tap: open   hold: hide   tap+hold: menu   2x tap: exit`, LINE_W)
+    const footer = fit(`swipe: select${more}  tap: open  hold: hide  tap+hold: menu  2x: exit`, LINE_W)
     return { header, body, footer }
   }
 }
