@@ -1,7 +1,7 @@
 #!/bin/sh
 # Bootstrap the ClaudeDeck bridge on a machine (run this ON that machine).
 #
-#   curl/scp this repo over, then:   sh scripts/bootstrap-bridge.sh
+#   git clone https://github.com/clausm0n/claudedeck.git ~/claudedeck && cd ~/claudedeck && sh scripts/bootstrap-bridge.sh
 #   or from your laptop:             ssh HOST 'cd ~/claudedeck && sh scripts/bootstrap-bridge.sh'
 #
 # What it does: npm install + build, install Claude Code hooks + statusline,

@@ -53,7 +53,7 @@ A bridge only sees Claude Code running **on its own machine** — an SSH tab sho
 
 ```bash
 # on the remote (Node >= 22; tmux for input):
-git clone <repo> ~/claudedeck && cd ~/claudedeck && sh scripts/bootstrap-bridge.sh   # prints its ws://…?token=… URL
+git clone https://github.com/clausm0n/claudedeck.git ~/claudedeck && cd ~/claudedeck && sh scripts/bootstrap-bridge.sh   # prints its ws://…?token=… URL
 
 # on the hub:
 claudedeck remote add studiom3 ws://<remote-ip>:7788/ws?token=<remote token>
