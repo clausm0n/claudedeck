@@ -93,7 +93,8 @@ npm run app:sim            # evenhub-simulator with automation port 9898
 4. **Install:** upload the `.ehpk` at <https://hub.evenrealities.com> (developer portal), then open it from the
    Even app (**Even Hub tab → Developer Mode → Me → Apps → Private builds → Install**). A packaged app has no
    `?bridge=` URL, so pair it once: run `claudedeck pair` on the machine (prints a QR with the machine name and the
-   `wss://` URL), then on the phone page tap **Scan QR** and point the camera at the terminal. Alternatives:
+   `wss://` URL; `--open` for a large one in the browser), then on the phone page tap **Scan QR** and take a photo of it
+   (the Even host returns a still, not a live preview; *From photo library* works with a screenshot/AirDropped image too). Alternatives:
    `claudedeck url --copy` + Universal Clipboard paste into *Add bridge*, or type the URL. Entries persist in host storage.
 
 The dev sideload (`evenhub qr`) works with plain `ws://` and needs no TLS.
