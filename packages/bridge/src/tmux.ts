@@ -17,9 +17,12 @@ export interface TmuxPane {
 let tmuxAvailable: boolean | null = null
 let tmuxBin = 'tmux'
 const TMUX_CANDIDATES = ['tmux', '/opt/homebrew/bin/tmux', '/usr/local/bin/tmux', '/usr/bin/tmux']
+const SEP = '<|>'
+/** tmux children get a UTF-8 locale so capture-pane keeps glyphs (❯, ⏺) instead of `_`. */
+const TMUX_ENV = { ...process.env, LANG: process.env.LANG || 'en_US.UTF-8', LC_ALL: process.env.LC_ALL || 'en_US.UTF-8' }
 
 async function tmux(args: string[]): Promise<string> {
-  const { stdout } = await execFileP(tmuxBin, args, { maxBuffer: 4 * 1024 * 1024 })
+  const { stdout } = await execFileP(tmuxBin, args, { maxBuffer: 4 * 1024 * 1024, env: TMUX_ENV })
   return stdout
 }
 
@@ -40,25 +43,35 @@ export async function hasTmux(): Promise<boolean> {
   return false
 }
 
+/** Last error from tmux/ps, for /debug. */
+export let lastTmuxError = ''
+
 /** All panes across all tmux sessions. Empty when tmux is absent or no server runs. */
 export async function listPanes(): Promise<TmuxPane[]> {
-  if (!(await hasTmux())) return []
+  if (!(await hasTmux())) {
+    lastTmuxError = 'tmux binary not found'
+    return []
+  }
   let out: string
   try {
     out = await tmux([
       'list-panes',
       '-a',
       '-F',
-      '#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_pid}\t#{pane_title}',
+      // A printable separator: in a C/POSIX locale (launchd) tmux replaces
+      // non-printable chars such as tabs in format output with `_`.
+      ['#{pane_id}', '#{session_name}', '#{window_index}', '#{window_name}', '#{pane_current_command}', '#{pane_current_path}', '#{pane_pid}', '#{pane_title}'].join(SEP),
     ])
-  } catch {
+    lastTmuxError = ''
+  } catch (err) {
+    lastTmuxError = `list-panes: ${(err as Error).message}`
     return [] // no server running
   }
   return out
     .split('\n')
     .filter(Boolean)
     .map(line => {
-      const [id, session, windowIndex, window, command, cwd, pid, title] = line.split('\t')
+      const [id, session, windowIndex, window, command, cwd, pid, title] = line.split(SEP)
       return { id, session, window, windowIndex: Number(windowIndex), command, cwd, pid: Number(pid), title: title ?? '' }
     })
 }
@@ -74,7 +87,13 @@ let procCache: { at: number; procs: Proc[] } | null = null
 /** Snapshot of the process table (cached ~1.5s). */
 async function processTable(): Promise<Proc[]> {
   if (procCache && Date.now() - procCache.at < 1500) return procCache.procs
-  const { stdout } = await execFileP('ps', ['-A', '-o', 'pid=,ppid=,args='], { maxBuffer: 8 * 1024 * 1024 })
+  let stdout: string
+  try {
+    ;({ stdout } = await execFileP('ps', ['-A', '-o', 'pid=,ppid=,args='], { maxBuffer: 8 * 1024 * 1024 }))
+  } catch (err) {
+    lastTmuxError = `ps: ${(err as Error).message}`
+    throw err
+  }
   const procs: Proc[] = []
   for (const line of stdout.split('\n')) {
     const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/)

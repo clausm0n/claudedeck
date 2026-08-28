@@ -36,6 +36,9 @@ function widenPath(): void {
   const extra = ['/opt/homebrew/bin', '/usr/local/bin', `${os.homedir()}/.local/bin`, '/usr/bin', '/bin', '/usr/sbin', '/sbin']
   const cur = (process.env.PATH ?? '').split(':').filter(Boolean)
   process.env.PATH = [...extra.filter(p => !cur.includes(p)), ...cur].join(':')
+  // launchd gives a C locale; tmux sanitizes non-ASCII/non-printable output there.
+  process.env.LANG ||= 'en_US.UTF-8'
+  process.env.LC_ALL ||= 'en_US.UTF-8'
 }
 
 async function main(): Promise<void> {

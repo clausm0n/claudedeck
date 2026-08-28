@@ -7,7 +7,7 @@ import type { ClientMessage, ServerMessage, SessionAction, SessionSummary } from
 import { PROTOCOL_VERSION } from '@claudedeck/shared'
 import type { BridgeConfig } from './config.js'
 import { SessionRegistry, type HookPayload, type StatuslinePayload } from './sessions.js'
-import { capturePane, sendKeys, sendText } from './tmux.js'
+import { capturePane, lastTmuxError, listPanes, paneRunsClaude, sendKeys, sendText } from './tmux.js'
 import { createStt } from './stt.js'
 import { RemoteBridge } from './remotes.js'
 import { log } from './log.js'
@@ -102,7 +102,17 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
     if (url.pathname === '/debug') {
       if (!local) return void res.writeHead(401).end()
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ path: process.env.PATH, tmux: registry.tmuxAvailable, sessions: registry.dump() }, null, 2))
+      const panes = await listPanes()
+      const claudePanes: string[] = []
+      let paneError = ''
+      for (const p of panes) {
+        try {
+          if (await paneRunsClaude(p)) claudePanes.push(p.id)
+        } catch (err) {
+          paneError = (err as Error).message
+        }
+      }
+      res.end(JSON.stringify({ path: process.env.PATH, tmux: registry.tmuxAvailable, tmuxError: lastTmuxError, paneError, panes: panes.map(p => `${p.id} pid=${p.pid} cmd=${p.command}`), claudePanes, sessions: registry.dump() }, null, 2))
       return
     }
     if (url.pathname === '/sessions') {
