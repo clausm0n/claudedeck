@@ -124,10 +124,15 @@ export class DictateScreen implements Screen {
   }
 
   private reviewItems(): Array<{ label: string; run: () => void }> {
+    const readOnly = !this.ctx.fleet.get(this.key)?.pane
     return [
       {
-        label: 'Send to Claude',
+        label: readOnly ? 'Send (unavailable: not in tmux)' : 'Send to Claude',
         run: () => {
+          if (readOnly) {
+            this.ctx.ui.toast('read-only: relaunch claude in a new shell (tmux wrapper)', 4000)
+            return
+          }
           const ok = this.ctx.fleet.sendText(this.key, this.text, true)
           this.ctx.ui.toast(ok ? 'sent' : 'not connected')
           this.ctx.ui.pop()

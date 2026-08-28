@@ -3,11 +3,20 @@
 # seconds; we forward it to the bridge (model, context %, session name) and print
 # a compact status line for the terminal.
 PORT="${CLAUDEDECK_PORT:-7788}"
+# Ancestor pids (nearest first) — the bridge picks the `claude` process among
+# them and uses it to notice when the session exits.
+ANC=""; P=$$; i=0
+while [ $i -lt 6 ] && [ -n "$P" ] && [ "$P" != "1" ] && [ "$P" != "0" ]; do
+  P=$(ps -o ppid= -p "$P" 2>/dev/null | tr -d ' ')
+  [ -n "$P" ] && ANC="$ANC $P"
+  i=$((i + 1))
+done
 INPUT=$(cat)
 printf '%s' "$INPUT" | curl -s -m 1 -o /dev/null \
   -X POST "http://127.0.0.1:${PORT}/statusline" \
   -H 'content-type: application/json' \
   -H "x-tmux-pane: ${TMUX_PANE:-}" \
+  -H "x-ancestors:${ANC}" \
   --data-binary @- >/dev/null 2>&1 &
 
 if command -v node >/dev/null 2>&1; then

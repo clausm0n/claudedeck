@@ -15,21 +15,29 @@ export interface TmuxPane {
 }
 
 let tmuxAvailable: boolean | null = null
+let tmuxBin = 'tmux'
+const TMUX_CANDIDATES = ['tmux', '/opt/homebrew/bin/tmux', '/usr/local/bin/tmux', '/usr/bin/tmux']
 
 async function tmux(args: string[]): Promise<string> {
-  const { stdout } = await execFileP('tmux', args, { maxBuffer: 4 * 1024 * 1024 })
+  const { stdout } = await execFileP(tmuxBin, args, { maxBuffer: 4 * 1024 * 1024 })
   return stdout
 }
 
+/** Find a working tmux binary even when PATH is minimal (launchd). Re-probes while absent. */
 export async function hasTmux(): Promise<boolean> {
-  if (tmuxAvailable !== null) return tmuxAvailable
-  try {
-    await execFileP('tmux', ['-V'])
-    tmuxAvailable = true
-  } catch {
-    tmuxAvailable = false
+  if (tmuxAvailable) return true
+  for (const bin of TMUX_CANDIDATES) {
+    try {
+      await execFileP(bin, ['-V'])
+      tmuxBin = bin
+      tmuxAvailable = true
+      return true
+    } catch {
+      /* try next */
+    }
   }
-  return tmuxAvailable
+  tmuxAvailable = false
+  return false
 }
 
 /** All panes across all tmux sessions. Empty when tmux is absent or no server runs. */
@@ -124,6 +132,27 @@ export async function sendKeys(paneId: string, keys: string[]): Promise<void> {
   for (const k of keys) {
     await tmux(['send-keys', '-t', paneId, k])
     await new Promise(r => setTimeout(r, 80))
+  }
+}
+
+/** Among candidate pids (a hook's ancestor chain), the one that is the `claude` CLI. */
+export async function claudePidAmong(pids: number[]): Promise<number | undefined> {
+  if (!pids.length) return undefined
+  const procs = await processTable()
+  const byPid = new Map(procs.map(p => [p.pid, p]))
+  for (const pid of pids) {
+    const p = byPid.get(pid)
+    if (p && CLAUDE_ARGS.test(p.args)) return pid
+  }
+  return undefined
+}
+
+export function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM'
   }
 }
 

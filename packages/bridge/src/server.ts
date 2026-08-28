@@ -75,10 +75,11 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
         return void res.writeHead(400).end('bad json')
       }
       const pane = header(req, 'x-tmux-pane')
+      const ancestors = (header(req, 'x-ancestors') ?? '').split(/\s+/).map(Number).filter(n => n > 1)
       if (url.pathname === '/hook') {
-        registry.applyHook(payload as HookPayload, { tmuxPane: pane })
+        registry.applyHook(payload as HookPayload, { tmuxPane: pane, ancestors })
       } else {
-        registry.applyStatusline(payload as StatuslinePayload, { tmuxPane: pane })
+        registry.applyStatusline(payload as StatuslinePayload, { tmuxPane: pane, ancestors })
       }
       // Hooks that parse JSON output treat `{}` as "no decision".
       res.writeHead(200, { 'content-type': 'application/json' }).end('{}')
@@ -289,6 +290,9 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
       }
     }
   }
+
+  // Periodic snapshot so the glasses refresh ages and notice stale sockets.
+  setInterval(() => broadcastSessions(), 30_000).unref()
 
   // Heartbeat: drop dead phones.
   setInterval(() => {

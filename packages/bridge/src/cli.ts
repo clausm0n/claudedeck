@@ -29,7 +29,17 @@ const HELP = `claudedeck — bridge between Claude Code sessions and the G2 glas
 Config: ${CONFIG_PATH}
 `
 
+// launchd (and some cron/systemd setups) start us with a minimal PATH; tmux,
+// whisper-cli and node from Homebrew/nvm would be invisible. Prepend the usual
+// locations so child processes and hook scripts find them.
+function widenPath(): void {
+  const extra = ['/opt/homebrew/bin', '/usr/local/bin', `${os.homedir()}/.local/bin`, '/usr/bin', '/bin', '/usr/sbin', '/sbin']
+  const cur = (process.env.PATH ?? '').split(':').filter(Boolean)
+  process.env.PATH = [...extra.filter(p => !cur.includes(p)), ...cur].join(':')
+}
+
 async function main(): Promise<void> {
+  widenPath()
   const cfg = loadConfig()
   switch (cmd) {
     case 'start': {

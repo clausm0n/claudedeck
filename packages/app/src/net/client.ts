@@ -23,6 +23,7 @@ export interface ClientEvents {
 const BACKOFF_MIN = 1000
 const BACKOFF_MAX = 15000
 const CONNECT_TIMEOUT_MS = 8000
+const STALL_MS = 45_000 // pings go out every 25s; silence beyond this means the socket is dead
 
 /** One WebSocket to one bridge daemon, with auto-reconnect. */
 export class BridgeClient extends Emitter<ClientEvents> {
@@ -40,6 +41,8 @@ export class BridgeClient extends Emitter<ClientEvents> {
   private closedByUser = false
   private subscribed: string | null = null
   private screenWaiters: Array<(lines: string[]) => void> = []
+  private lastMessageAt = 0
+  private stallTimer: number | null = null
 
   constructor(public readonly entry: BridgeEntry) {
     super()
@@ -98,8 +101,16 @@ export class BridgeClient extends Emitter<ClientEvents> {
       this.send({ type: 'hello', client: 'claudedeck-app', protocol: PROTOCOL_VERSION })
       if (this.subscribed) this.send({ type: 'subscribe', sessionId: this.subscribed })
       this.pingTimer = window.setInterval(() => this.send({ type: 'ping' }), 25_000)
+      this.lastMessageAt = Date.now()
+      this.stallTimer = window.setInterval(() => {
+        if (Date.now() - this.lastMessageAt > STALL_MS) {
+          this.lastError = 'no reply from bridge (stalled socket)'
+          ws.close()
+        }
+      }, 10_000)
     }
     ws.onmessage = ev => {
+      this.lastMessageAt = Date.now()
       if (typeof ev.data !== 'string') return
       let msg: ServerMessage
       try {
@@ -138,6 +149,10 @@ export class BridgeClient extends Emitter<ClientEvents> {
     if (this.pingTimer !== null) {
       clearInterval(this.pingTimer)
       this.pingTimer = null
+    }
+    if (this.stallTimer !== null) {
+      clearInterval(this.stallTimer)
+      this.stallTimer = null
     }
   }
 

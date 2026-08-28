@@ -108,7 +108,8 @@ export class SessionsScreen implements Screen {
               ? `${s.tool.name} ${s.tool.summary}`
               : title || (s.lastLine ?? '')
         const multi = fleet.multiMachine ? `@${s.machine} ` : ''
-        rows.push(fit(`${cur} ${glyph} ${project} ${multi}${label} ${age}  ${detail}`, LINE_W))
+        const ro = s.pane ? '' : ' [ro]'
+        rows.push(fit(`${cur} ${glyph} ${project} ${multi}${label} ${age}${ro}  ${detail}`, LINE_W))
       }
       body = rows.join('\n')
     }

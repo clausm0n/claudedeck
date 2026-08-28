@@ -200,4 +200,9 @@ fleet.on('sessions', list => {
   if (needs.length === 1 && list.length === 1) ui.push(new SessionScreen(ctx, needs[0].key))
 })
 
+// Bridge replies to actions/sends arrive asynchronously — show failures.
+fleet.on('ack', a => {
+  if (!a.ok) ui.toast(`${a.of} failed: ${a.message ?? 'unknown error'}`, 4000)
+})
+
 window.addEventListener('beforeunload', cleanup)

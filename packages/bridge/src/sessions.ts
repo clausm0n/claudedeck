@@ -3,8 +3,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { SessionDetail, SessionStatus, SessionSummary, ToolRef } from '@claudedeck/shared'
 import type { BridgeConfig } from './config.js'
-import { capturePane, listPanes, paneRunsClaude, type TmuxPane } from './tmux.js'
+import { capturePane, claudePidAmong, listPanes, paneRunsClaude, pidAlive, type TmuxPane } from './tmux.js'
 import { findTranscriptForCwd, parseTranscript, summarizeToolInput, type TranscriptInfo } from './transcript.js'
+import { log } from './log.js'
 
 export interface HookPayload {
   session_id?: string
@@ -48,9 +49,23 @@ interface Session extends SessionDetail {
   endedAt?: number
   /** Last few pane rows, used for permission heuristics. */
   screenTail?: string[]
+  /** The claude CLI process, when a hook/statusline told us its ancestry. */
+  pid?: number
+  /** Last time a hook or statusline post arrived for this session. */
+  lastSeen?: number
+  /** Last time an actual hook event (not statusline) arrived — hooks are authoritative. */
+  lastHookAt?: number
+  /** Consecutive scans in which the pane no longer runs claude. */
+  paneMisses?: number
 }
 
+type Meta = { tmuxPane?: string; ancestors?: number[] }
+
 const ENDED_TTL_MS = 3 * 60 * 1000
+/** Sessions known only from statusline posts: gone this long without a post → assume exited. */
+const SILENT_MS = 3 * 60 * 1000
+/** Transcript touched more recently than this → a turn is probably in progress. */
+const TRANSCRIPT_ACTIVE_MS = 25 * 1000
 
 const PERMISSION_RX = /(Do you want to (proceed|make this edit|run|allow|create|delete|continue)|Allow .* to |Yes, and don't ask again|❯ 1\. Yes|\(esc\)\s*$|Waiting for your (approval|answer)|Would you like to)/im
 // Only the spinner line is a reliable "turn in progress" marker; tool
@@ -207,23 +222,35 @@ export class SessionRegistry extends EventEmitter {
     if (s.source === 'tmux' && s.status !== 'needs_permission') {
       s.tool = info.pendingTool
     }
-    // Sessions we only know from the statusline (no hook events yet, no pane)
-    // get a best-effort status from the transcript shape.
-    if (s.source === 'hook' && s.status === 'unknown' && !s.pane) {
-      const recent = (info.lastAssistantAt ?? 0) > Date.now() - 6 * 3600 * 1000
-      if (info.pendingTool && recent) {
+    // Sessions without hook events (started before the hooks were installed)
+    // and without a pane: the transcript is the only status signal, so
+    // re-derive on every refresh instead of once.
+    if (s.source === 'hook' && !s.pane && !s.lastHookAt && s.status !== 'ended') {
+      const active = (s.transcriptMtime ?? 0) > Date.now() - TRANSCRIPT_ACTIVE_MS
+      if (info.pendingTool && active) {
         s.tool = info.pendingTool
         this.touch(s, 'working')
+      } else if (active && s.status === 'working') {
+        this.touch(s)
       } else {
+        s.tool = undefined
         this.touch(s, 'idle')
       }
     }
     this.markChanged(s.id)
   }
 
+  private notePid(s: Session, meta: Meta): void {
+    s.lastSeen = Date.now()
+    if (s.pid || !meta.ancestors?.length) return
+    void claudePidAmong(meta.ancestors).then(pid => {
+      if (pid) s.pid = pid
+    })
+  }
+
   // ───────────────────────── hooks ─────────────────────────
 
-  applyHook(p: HookPayload, meta: { tmuxPane?: string }): void {
+  applyHook(p: HookPayload, meta: Meta): void {
     const id = p.session_id
     if (!id) return
     const ev = p.hook_event_name ?? ''
@@ -232,6 +259,8 @@ export class SessionRegistry extends EventEmitter {
       transcriptPath: p.transcript_path,
       source: 'hook',
     })
+    s.lastHookAt = Date.now()
+    this.notePid(s, meta)
     if (p.cwd && !s.cwd) s.cwd = p.cwd
     if (!s.name || s.name === id.slice(0, 8)) this.setName(s)
     if (meta.tmuxPane) s.pane = meta.tmuxPane
@@ -327,11 +356,17 @@ export class SessionRegistry extends EventEmitter {
     }
   }
 
-  applyStatusline(p: StatuslinePayload, meta: { tmuxPane?: string } = {}): void {
+  applyStatusline(p: StatuslinePayload, meta: Meta = {}): void {
     const id = p.session_id
     if (!id) return
     const isNew = !this.sessions.has(id)
     const s = this.upsert(id, { cwd: p.cwd, transcriptPath: p.transcript_path, source: 'hook' })
+    this.notePid(s, meta)
+    if (s.status === 'ended') {
+      // It is posting again → it is alive after all (e.g. resumed).
+      s.endedAt = undefined
+      this.touch(s, 'unknown')
+    }
     if (p.workspace?.project_dir && p.workspace.project_dir !== s.projectDir) {
       s.projectDir = p.workspace.project_dir
       this.setName(s)
@@ -349,7 +384,7 @@ export class SessionRegistry extends EventEmitter {
       s.customName = p.session_name
       this.setName(s)
     }
-    if (isNew || s.status === 'unknown') this.refreshTranscript(s, true)
+    this.refreshTranscript(s, isNew || s.status === 'unknown')
     this.markChanged(id)
   }
 
@@ -365,6 +400,20 @@ export class SessionRegistry extends EventEmitter {
   }
 
   private async scanTmux(): Promise<void> {
+    try {
+      await this.scanTmuxInner()
+    } catch (err) {
+      const now = Date.now()
+      if (now - this.lastScanErrorAt > 60_000) {
+        this.lastScanErrorAt = now
+        log(`tmux scan failed: ${(err as Error).message}`)
+      }
+    }
+  }
+
+  private lastScanErrorAt = 0
+
+  private async scanTmuxInner(): Promise<void> {
     let panes: TmuxPane[] = []
     try {
       panes = await listPanes()
@@ -386,9 +435,20 @@ export class SessionRegistry extends EventEmitter {
     // Attach panes to hook sessions that lack one (match by cwd when unique).
     for (const s of this.sessions.values()) {
       if (s.pane && !paneIds.has(s.pane)) {
-        // pane went away
-        s.pane = undefined
-        this.markChanged(s.id)
+        // The pane no longer runs claude (or is gone). Two consecutive misses
+        // (the process table is cached) mean the session really exited.
+        s.paneMisses = (s.paneMisses ?? 0) + 1
+        if (s.paneMisses >= 2) {
+          s.pane = undefined
+          if (s.source === 'hook' && s.status !== 'ended') {
+            s.endedAt = now
+            s.tool = undefined
+            this.touch(s, 'ended')
+          }
+          this.markChanged(s.id)
+        }
+      } else if (s.pane) {
+        s.paneMisses = 0
       }
       if (!s.pane && s.source === 'hook' && s.status !== 'ended') {
         const matches = claudePanes.filter(p => p.cwd === s.cwd && !this.paneClaimed(p.id))
@@ -429,9 +489,19 @@ export class SessionRegistry extends EventEmitter {
       this.refreshTranscript(s, !existing)
     }
 
-    // Screen heuristics + housekeeping.
+    // Liveness + screen heuristics + housekeeping.
     for (const [id, s] of this.sessions) {
-      if (s.status === 'ended' && s.endedAt && now - s.endedAt > ENDED_TTL_MS) {
+      if (s.status !== 'ended' && s.source === 'hook') {
+        const processGone = s.pid !== undefined && !pidAlive(s.pid)
+        const silent = s.pid === undefined && !s.pane && !!s.lastSeen && now - s.lastSeen > SILENT_MS
+        if (processGone || silent) {
+          s.endedAt = now
+          s.tool = undefined
+          s.pane = undefined
+          this.touch(s, 'ended')
+        }
+      }
+      if (s.status === 'ended' && s.endedAt && now - s.endedAt > (s.pid || s.paneMisses ? 20_000 : ENDED_TTL_MS)) {
         this.sessions.delete(id)
         this.markChanged(id)
         continue
