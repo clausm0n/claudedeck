@@ -61,6 +61,12 @@ export class UI {
     this.redraw(true)
   }
 
+  /** Blank the glasses until the next tap (see HiddenScreen). */
+  hide(make: () => Screen): void {
+    if (this.current?.name === 'hidden') return
+    this.push(make())
+  }
+
   popTo(name: string): void {
     while (this.stack.length > 1 && this.current?.name !== name) {
       const top = this.stack.pop()

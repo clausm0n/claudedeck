@@ -4,6 +4,7 @@ import { BODY_LINES, INNER_W, LINE_W } from '../display'
 import { fit } from '../text'
 import type { Screen, ScreenContext } from '../ui'
 import { SessionScreen } from './session'
+import { HiddenScreen } from './hidden'
 
 /** Root screen: every Claude Code session across every bridge. */
 export class SessionsScreen implements Screen {
@@ -44,6 +45,11 @@ export class SessionsScreen implements Screen {
 
   onDoubleClick(): boolean {
     return false // root → system exit dialog
+  }
+
+  /** Hold on the root screen = hide the display (wake with any tap). */
+  onLongPress(): void {
+    this.ctx.ui.hide(() => new HiddenScreen(this.ctx))
   }
 
   render(): Frame {
@@ -108,7 +114,7 @@ export class SessionsScreen implements Screen {
     }
 
     const more = list.length > BODY_LINES ? ` ${this.cursor + 1}/${list.length}` : ''
-    const footer = fit(`swipe: select${more}   tap: open   hold: menu   double-tap: exit`, LINE_W)
+    const footer = fit(`swipe: select${more}   tap: open   hold: hide   tap+hold: menu   2x tap: exit`, LINE_W)
     return { header, body, footer }
   }
 }

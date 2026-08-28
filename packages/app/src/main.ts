@@ -5,6 +5,7 @@ import { SessionsScreen } from './glasses/screens/sessions'
 import { SessionScreen } from './glasses/screens/session'
 import { DictateScreen } from './glasses/screens/dictate'
 import { RawScreen } from './glasses/screens/raw'
+import { HiddenScreen } from './glasses/screens/hidden'
 import { runAction } from './glasses/screens/actions'
 import { Fleet } from './net/fleet'
 import type { BridgeEntry } from './net/client'
@@ -22,6 +23,7 @@ const MENU = {
   RAW: 7,
   SESSIONS: 8,
   RECONNECT: 9,
+  HIDE: 10,
 } as const
 
 const MENU_ITEMS = [
@@ -34,6 +36,7 @@ const MENU_ITEMS = [
   { id: MENU.RAW, label: 'Raw terminal' },
   { id: MENU.SESSIONS, label: 'All sessions' },
   { id: MENU.RECONNECT, label: 'Reconnect bridges' },
+  { id: MENU.HIDE, label: 'Hide display' },
 ]
 
 // ───────────────────────── phone side first (works even without the Even host) ─────────────────────────
@@ -135,6 +138,9 @@ function onMenu(itemID: number): void {
     case MENU.RECONNECT:
       fleet.kickAll()
       ui.toast('reconnecting...')
+      return
+    case MENU.HIDE:
+      ui.hide(() => new HiddenScreen(ctx))
       return
   }
 }

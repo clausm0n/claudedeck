@@ -89,14 +89,17 @@ Layout is always header / body (8 lines) / footer. All screens update flicker-fr
 
 | Screen | swipe | tap | double-tap | tap-then-hold |
 |---|---|---|---|---|
-| **Sessions** (root) | move cursor | open session | exit dialog | contextual menu |
+| **Sessions** (root) | move cursor | open session | exit dialog | hold = **hide display**; tap-then-hold = contextual menu |
 | **Session** | page through last message | actions | back | contextual menu (hold alone = push-to-talk dictation) |
 | **Actions** | move cursor | run | back | |
 | **Dictate** | — | stop & transcribe | cancel | |
 | **Review transcript** | select Send / Retry / Cancel | run | cancel | |
 | **Raw terminal** | scroll | refresh | back | |
+| **Hidden** (display off) | wake | wake (opens the session if one started waiting for approval) | wake | |
 
-Contextual menu (OS overlay, up to 10 items): Approve (y) · Approve all similar (2) · Deny/Esc · Interrupt · Send "continue" · Dictate · Raw terminal · All sessions · Reconnect bridges.
+Contextual menu (OS overlay, up to 10 items): Approve (y) · Approve all similar (2) · Deny/Esc · Interrupt · Send "continue" · Dictate · Raw terminal · All sessions · Reconnect bridges · Hide display.
+
+**Hide display**: blanks the glasses (no lit pixels = nothing visible) while staying connected. Any tap wakes it. If a session starts waiting for approval while hidden, a single header line appears — tap opens that session.
 
 Row format on the Sessions screen: `> ? evenapp_G2 @machine NEEDS OK 12s  Bash: npm test`. Glyphs: `?` needs OK, `>` working, `-` idle, `~` compacting, `!` error, `x` ended. Needs-attention sessions sort first.
 
