@@ -7,6 +7,8 @@ import type { BridgeEntry } from './net/client'
 export interface PhoneUiOptions {
   /** Take a photo with the phone camera and return the decoded QR text (null when cancelled). */
   scanQr?: () => Promise<string | null>
+  /** Pick an image from the photo library and decode a QR from it. */
+  scanAlbum?: () => Promise<string | null>
 }
 
 /** Phone-side companion page: bridge configuration, status, glasses mirror. */
@@ -27,6 +29,7 @@ export function mountPhoneUi(fleet: Fleet, getBridges: () => BridgeEntry[], setB
           <input id="bUrl" placeholder="ws://100.x.y.z:7788/ws?token=..." inputmode="url" />
           <button class="primary" type="submit">Add bridge</button>
           <button type="button" id="scanQr">Scan QR</button>
+          <button type="button" id="scanAlbum">From photo library</button>
         </form>
         <p class="muted">Run <code>claudedeck pair</code> on a machine and tap <b>Scan QR</b>, or paste the URL from <code>claudedeck url --copy</code>.</p>
       </section>
@@ -108,17 +111,16 @@ export function mountPhoneUi(fleet: Fleet, getBridges: () => BridgeEntry[], setB
     url.value = ''
   })
 
-  const scanBtn = app.querySelector<HTMLButtonElement>('#scanQr')!
-  scanBtn.addEventListener('click', async () => {
-    if (!opts.scanQr) {
+  const scanWith = async (btn: HTMLButtonElement, fn: (() => Promise<string | null>) | undefined, what: string) => {
+    if (!fn) {
       log('QR scanning needs the Even host (open this page inside the Even app)')
       return
     }
-    scanBtn.disabled = true
-    log('opening the camera — fill the frame with the QR from `claudedeck pair`')
+    btn.disabled = true
+    log(`${what} — show the QR from \`claudedeck pair\``)
     try {
-      const text = await opts.scanQr()
-      if (text === null) log('scan cancelled / no photo')
+      const text = await fn()
+      if (text === null) log('cancelled / no image')
       else {
         const entry = parsePairing(text)
         if (entry) addEntry(entry)
@@ -127,9 +129,13 @@ export function mountPhoneUi(fleet: Fleet, getBridges: () => BridgeEntry[], setB
     } catch (err) {
       log(`scan failed: ${(err as Error).message ?? err}`)
     } finally {
-      scanBtn.disabled = false
+      btn.disabled = false
     }
-  })
+  }
+  const scanBtn = app.querySelector<HTMLButtonElement>('#scanQr')!
+  scanBtn.addEventListener('click', () => void scanWith(scanBtn, opts.scanQr, 'opening the camera'))
+  const albumBtn = app.querySelector<HTMLButtonElement>('#scanAlbum')!
+  albumBtn.addEventListener('click', () => void scanWith(albumBtn, opts.scanAlbum, 'pick a photo of the QR'))
 
   const lines: string[] = []
   const log = (msg: string) => {

@@ -97,25 +97,94 @@ async function scanLive(): Promise<string | null> {
   })
 }
 
-/** Fallback: one photo through the Even host camera, decoded at several scales/crops. */
-async function scanPhoto(): Promise<string | null> {
-  if (!hostBridge) throw new Error('Even host not ready yet')
-  const shot = await Promise.race([
-    hostBridge.captureImageFromCamera(),
-    new Promise<never>((_, rej) => setTimeout(() => rej(new Error('the Even host never returned a photo (2 min)')), 120_000)),
-  ])
-  if (!shot) return null
-  const b64 = shot.base64 ?? ''
-  phone.log(`host camera returned: type=${shot.mimeType || '?'} size=${shot.size ?? '?'} base64=${b64.length} chars path=${shot.path || '-'}`)
-  if (!b64) throw new Error('camera returned no image data')
-  const img = new Image()
-  img.src = b64.startsWith('data:') ? b64 : `data:${shot.mimeType || 'image/jpeg'};base64,${b64}`
-  try {
-    await img.decode()
-  } catch {
-    throw new Error(`cannot decode the photo (${shot.mimeType || 'unknown type'})`)
+/** Mirror SDK/host console lines about images into the phone log while `fn` runs (the host payload shape is otherwise invisible). */
+async function withConsoleTap<T>(fn: () => Promise<T>): Promise<T> {
+  const orig = { log: console.log, warn: console.warn, error: console.error, debug: console.debug }
+  let n = 0
+  const tap = (level: keyof typeof orig) => (...args: unknown[]) => {
+    orig[level].apply(console, args)
+    if (n >= 12) return
+    const line = args.map(a => (typeof a === 'string' ? a : safeJson(a))).join(' ')
+    if (/image|camera|album|base64|asset|pick|capture/i.test(line)) {
+      n++
+      phone.log(`console.${level}: ${line.slice(0, 300)}`)
+    }
   }
-  phone.log(`photo ${img.naturalWidth}x${img.naturalHeight} — decoding`)
+  console.log = tap('log')
+  console.warn = tap('warn')
+  console.error = tap('error')
+  console.debug = tap('debug')
+  try {
+    return await fn()
+  } finally {
+    Object.assign(console, orig)
+  }
+}
+
+function safeJson(v: unknown): string {
+  try {
+    const s = JSON.stringify(v, (_k, val) => (typeof val === 'string' && val.length > 80 ? `${val.slice(0, 40)}…(${val.length} chars)` : val))
+    return s ?? String(v)
+  } catch {
+    return String(v)
+  }
+}
+
+function loadImage(src: string, ms = 8000): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    const t = setTimeout(() => reject(new Error('timeout')), ms)
+    img.onload = () => {
+      clearTimeout(t)
+      resolve(img)
+    }
+    img.onerror = () => {
+      clearTimeout(t)
+      reject(new Error('load error'))
+    }
+    img.src = src
+  })
+}
+
+/** Turn whatever the host gave us (base64 or a file path) into a decoded image. */
+async function imageFromAsset(shot: { base64?: string; path?: string; mimeType?: string }): Promise<HTMLImageElement> {
+  const b64 = shot.base64 ?? ''
+  if (b64) {
+    const src = b64.startsWith('data:') ? b64 : `data:${shot.mimeType || 'image/jpeg'};base64,${b64}`
+    return loadImage(src).catch(() => {
+      throw new Error(`cannot decode the base64 image (${shot.mimeType || 'unknown type'})`)
+    })
+  }
+  const p = shot.path ?? ''
+  if (!p) throw new Error('camera returned neither image data nor a path')
+  const candidates = [p]
+  if (p.startsWith('/')) candidates.push(`file://${p}`)
+  if (p.startsWith('file://')) candidates.push(p.slice(7))
+  for (const c of candidates) {
+    try {
+      const img = await loadImage(c)
+      phone.log(`loaded image via <img src="${c.slice(0, 60)}…">`)
+      return img
+    } catch (err) {
+      phone.log(`img ${c.slice(0, 60)}… → ${(err as Error).message}`)
+    }
+    try {
+      const res = await fetch(c)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const img = await loadImage(url)
+      phone.log(`loaded image via fetch(${c.slice(0, 60)}…) ${blob.type} ${Math.round(blob.size / 1024)} KB`)
+      return img
+    } catch (err) {
+      phone.log(`fetch ${c.slice(0, 60)}… → ${(err as Error).message}`)
+    }
+  }
+  throw new Error(`the WebView cannot read the host's image file (${p.slice(0, 80)})`)
+}
+
+/** Decode a QR from a still image at several scales and centre crops. */
+function decodeStill(img: HTMLImageElement): string | null {
   const canvas = document.createElement('canvas')
   const ctx2d = canvas.getContext('2d', { willReadFrequently: true })
   if (!ctx2d) throw new Error('no canvas')
@@ -141,7 +210,26 @@ async function scanPhoto(): Promise<string | null> {
       return hit
     }
   }
-  throw new Error('no QR code in the photo — fill the frame with the code, hold still, avoid glare')
+  return null
+}
+
+/** One still through the Even host (camera or photo library), decoded at several scales/crops. */
+async function scanPhoto(source: 'camera' | 'album'): Promise<string | null> {
+  if (!hostBridge) throw new Error('Even host not ready yet')
+  const host = hostBridge
+  const shot = await withConsoleTap(() =>
+    Promise.race([
+      source === 'camera' ? host.captureImageFromCamera() : host.pickImageFromAlbum(),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('the Even host never returned an image (2 min)')), 120_000)),
+    ]),
+  )
+  if (!shot) return null
+  phone.log(`host ${source} returned: type=${shot.mimeType || '?'} size=${shot.size ?? '?'} base64=${(shot.base64 ?? '').length} chars name=${shot.name || '-'} path=${shot.path || '-'}`)
+  const img = await imageFromAsset(shot)
+  phone.log(`image ${img.naturalWidth}x${img.naturalHeight} — decoding`)
+  const hit = decodeStill(img)
+  if (!hit) throw new Error('no QR code in the image — fill the frame with the code, hold still, avoid glare')
+  return hit
 }
 
 /** Scan a pairing QR: live viewfinder when the WebView grants the camera, else one host photo. */
@@ -151,14 +239,19 @@ async function scanQr(): Promise<string | null> {
   } catch (err) {
     phone.log(`live camera unavailable (${(err as Error).message}) — falling back to a photo`)
   }
-  return scanPhoto()
+  return scanPhoto('camera')
+}
+
+/** Pairing from a photo already in the library (screenshot / AirDropped QR). */
+function scanAlbum(): Promise<string | null> {
+  return scanPhoto('album')
 }
 
 const phone = mountPhoneUi(
   fleet,
   () => bridges,
   next => (bridges = next),
-  { scanQr },
+  { scanQr, scanAlbum },
 )
 if (bridgesFromQuery().length) saveBridges(bridges)
 fleet.configure(bridges)
