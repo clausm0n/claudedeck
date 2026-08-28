@@ -45,27 +45,82 @@ const fleet = new Fleet()
 let bridges: BridgeEntry[] = mergeBridges(loadBridgesSync(), bridgesFromQuery())
 let hostBridge: EvenAppBridge | null = null
 
-/** Photo → QR text, for pairing with `claudedeck pair`. Needs the `camera` permission. */
-async function scanQr(): Promise<string | null> {
+function decodeFrame(ctx2d: CanvasRenderingContext2D, canvas: HTMLCanvasElement): string | null {
+  const data = ctx2d.getImageData(0, 0, canvas.width, canvas.height)
+  return jsQR(data.data, data.width, data.height, { inversionAttempts: 'attemptBoth' })?.data ?? null
+}
+
+/**
+ * Live viewfinder: the WebView's own camera stream, scanned ~5×/s until a code
+ * is read or the user cancels. Throws when the WebView refuses the camera.
+ */
+async function scanLive(): Promise<string | null> {
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error('getUserMedia unavailable in this WebView')
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: false,
+  })
+  const overlay = document.createElement('div')
+  overlay.className = 'scan-overlay'
+  overlay.innerHTML = `<video playsinline autoplay muted></video><div class="scan-hint">Point at the QR from <code>claudedeck pair</code></div><button type="button">Cancel</button>`
+  document.body.appendChild(overlay)
+  const video = overlay.querySelector('video')!
+  video.srcObject = stream
+  await video.play()
+  const canvas = document.createElement('canvas')
+  const ctx2d = canvas.getContext('2d', { willReadFrequently: true })!
+  return new Promise<string | null>(resolve => {
+    let done = false
+    let frames = 0
+    const finish = (v: string | null) => {
+      if (done) return
+      done = true
+      clearInterval(timer)
+      clearTimeout(giveUp)
+      stream.getTracks().forEach(t => t.stop())
+      overlay.remove()
+      phone.log(`live scan ${v ? 'read a code' : 'stopped'} after ${frames} frames`)
+      resolve(v)
+    }
+    overlay.querySelector('button')!.onclick = () => finish(null)
+    const timer = window.setInterval(() => {
+      if (video.readyState < 2 || !video.videoWidth) return
+      frames++
+      const scale = Math.min(1, 900 / Math.max(video.videoWidth, video.videoHeight))
+      canvas.width = Math.round(video.videoWidth * scale)
+      canvas.height = Math.round(video.videoHeight * scale)
+      ctx2d.drawImage(video, 0, 0, canvas.width, canvas.height)
+      const hit = decodeFrame(ctx2d, canvas)
+      if (hit) finish(hit)
+    }, 200)
+    const giveUp = window.setTimeout(() => finish(null), 120_000)
+  })
+}
+
+/** Fallback: one photo through the Even host camera, decoded at several scales/crops. */
+async function scanPhoto(): Promise<string | null> {
   if (!hostBridge) throw new Error('Even host not ready yet')
-  const shot = await hostBridge.captureImageFromCamera()
+  const shot = await Promise.race([
+    hostBridge.captureImageFromCamera(),
+    new Promise<never>((_, rej) => setTimeout(() => rej(new Error('the Even host never returned a photo (2 min)')), 120_000)),
+  ])
   if (!shot) return null
-  if (!shot.base64) throw new Error(`camera returned no image data (${shot.mimeType || 'unknown type'}, ${shot.size} bytes, path ${shot.path || '-'})`)
+  const b64 = shot.base64 ?? ''
+  phone.log(`host camera returned: type=${shot.mimeType || '?'} size=${shot.size ?? '?'} base64=${b64.length} chars path=${shot.path || '-'}`)
+  if (!b64) throw new Error('camera returned no image data')
   const img = new Image()
-  img.src = shot.base64.startsWith('data:') ? shot.base64 : `data:${shot.mimeType || 'image/jpeg'};base64,${shot.base64}`
+  img.src = b64.startsWith('data:') ? b64 : `data:${shot.mimeType || 'image/jpeg'};base64,${b64}`
   try {
     await img.decode()
   } catch {
-    throw new Error(`cannot decode the photo (${shot.mimeType || 'unknown type'}, ${Math.round(shot.base64.length / 1024)} KB)`)
+    throw new Error(`cannot decode the photo (${shot.mimeType || 'unknown type'})`)
   }
-  phone.log(`photo ${img.naturalWidth}x${img.naturalHeight} ${shot.mimeType || ''} ${Math.round(shot.base64.length * 0.75 / 1024)} KB — decoding`)
+  phone.log(`photo ${img.naturalWidth}x${img.naturalHeight} — decoding`)
   const canvas = document.createElement('canvas')
   const ctx2d = canvas.getContext('2d', { willReadFrequently: true })
   if (!ctx2d) throw new Error('no canvas')
   const w = img.naturalWidth
   const h = img.naturalHeight
-  // Several sizes (screen photos alias badly at some scales), full frame then a
-  // centre crop — the code is usually in the middle of the frame.
   const attempts: Array<{ crop: number; maxDim: number }> = [
     { crop: 1, maxDim: 800 },
     { crop: 1, maxDim: 1200 },
@@ -76,20 +131,27 @@ async function scanQr(): Promise<string | null> {
   for (const { crop, maxDim } of attempts) {
     const sw = Math.round(w * crop)
     const sh = Math.round(h * crop)
-    const sx = Math.round((w - sw) / 2)
-    const sy = Math.round((h - sh) / 2)
     const scale = Math.min(1, maxDim / Math.max(sw, sh))
     canvas.width = Math.max(1, Math.round(sw * scale))
     canvas.height = Math.max(1, Math.round(sh * scale))
-    ctx2d.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
-    const data = ctx2d.getImageData(0, 0, canvas.width, canvas.height)
-    const hit = jsQR(data.data, data.width, data.height, { inversionAttempts: 'attemptBoth' })
-    if (hit?.data) {
+    ctx2d.drawImage(img, Math.round((w - sw) / 2), Math.round((h - sh) / 2), sw, sh, 0, 0, canvas.width, canvas.height)
+    const hit = decodeFrame(ctx2d, canvas)
+    if (hit) {
       phone.log(`QR found (crop ${crop}, ${canvas.width}x${canvas.height})`)
-      return hit.data
+      return hit
     }
   }
-  throw new Error('no QR code in the photo — fill the frame with the code, hold still, avoid glare; `claudedeck pair --open` gives a crisper code')
+  throw new Error('no QR code in the photo — fill the frame with the code, hold still, avoid glare')
+}
+
+/** Scan a pairing QR: live viewfinder when the WebView grants the camera, else one host photo. */
+async function scanQr(): Promise<string | null> {
+  try {
+    return await scanLive()
+  } catch (err) {
+    phone.log(`live camera unavailable (${(err as Error).message}) — falling back to a photo`)
+  }
+  return scanPhoto()
 }
 
 const phone = mountPhoneUi(
