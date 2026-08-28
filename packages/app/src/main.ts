@@ -239,12 +239,21 @@ async function scanQr(): Promise<string | null> {
   } catch (err) {
     phone.log(`live camera unavailable (${(err as Error).message}) — falling back to a photo`)
   }
-  return scanPhoto('camera')
+  return afterHostUi(scanPhoto('camera'))
 }
 
 /** Pairing from a photo already in the library (screenshot / AirDropped QR). */
 function scanAlbum(): Promise<string | null> {
-  return scanPhoto('album')
+  return afterHostUi(scanPhoto('album'))
+}
+
+/** Host UIs (camera, album) cover the plugin; the glasses page may not survive — redraw it. */
+async function afterHostUi<T>(p: Promise<T>): Promise<T> {
+  try {
+    return await p
+  } finally {
+    void display.rebuild().catch(() => {})
+  }
 }
 
 const phone = mountPhoneUi(
@@ -282,15 +291,21 @@ if (hostBridges && hostBridges.length) {
 let micOn = false
 async function mic(on: boolean): Promise<void> {
   if (micOn === on) return
-  const ok = await evenBridge.audioControl(on, AudioInputSource.Glasses)
+  let ok = await evenBridge.audioControl(on, AudioInputSource.Glasses)
   if (!ok && on) {
-    // The host only hands out the glasses mic after a *successful* startup page
-    // create (SDK README: "Glasses MIC returns false → create the startup page first").
-    throw new Error(
-      created === 0
-        ? 'host refused the glasses mic (g2-microphone permission?)'
-        : `host refused the glasses mic: startup page result ${created} — relaunch the app`,
-    )
+    // The host only hands out the glasses mic while *its* copy of our startup
+    // page is alive; the camera UI (pairing) or a long background can drop it
+    // (SDK README: "Glasses MIC returns false → create the startup page first").
+    phone.log('mic refused — rebuilding the glasses page and retrying')
+    await display.rebuild().catch(() => false)
+    ok = await evenBridge.audioControl(true, AudioInputSource.Glasses)
+    if (!ok) {
+      const code = await display.recreate()
+      phone.log(`startup page re-created → ${code === 0 ? 'ok' : `result ${code}`}`)
+      ok = await evenBridge.audioControl(true, AudioInputSource.Glasses)
+    }
+    if (!ok) throw new Error(`host refused the glasses mic even after re-creating the page (first create: ${created}) — relaunch the app`)
+    phone.log('mic ok after page rebuild')
   }
   micOn = on
 }

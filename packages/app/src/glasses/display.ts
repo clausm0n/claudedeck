@@ -114,6 +114,23 @@ export class Display {
     }
   }
 
+  /** Re-run the one-shot page create (host lost the page entirely, e.g. after the camera UI). */
+  recreate(): Promise<number> {
+    return this.enqueue(async () => {
+      try {
+        const result = await timeout(
+          this.bridge.createStartUpPageContainer(
+            new CreateStartUpPageContainer({ containerTotalNum: 3, textObject: this.containers(this.last), menuObject: this.menuObject() }),
+          ),
+          START_TIMEOUT_MS,
+        )
+        return typeof result === 'number' ? result : -1
+      } catch {
+        return -2
+      }
+    })
+  }
+
   /** Full redraw (flickers) — used only when the host may have lost our page. */
   rebuild(): Promise<boolean> {
     return this.enqueue(async () => {
