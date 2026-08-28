@@ -14,6 +14,12 @@ export interface FleetDetail extends SessionDetail {
   bridgeId: string
 }
 
+/** Somewhere a new terminal can be opened: a bridge, or a machine it relays. */
+export interface TerminalTarget {
+  bridgeId: string
+  machine: string
+}
+
 export interface FleetEvents {
   sessions: FleetSession[]
   bridges: BridgeClient[]
@@ -133,6 +139,31 @@ export class Fleet extends Emitter<FleetEvents> {
   }
   sttAvailable(key: string): boolean {
     return this.clientFor(key)?.sttAvailable ?? false
+  }
+
+  /** Every open bridge, plus every machine seen through it (relayed remotes). */
+  terminalTargets(): TerminalTarget[] {
+    const out: TerminalTarget[] = []
+    const seen = new Set<string>()
+    for (const [id, c] of this.clients) {
+      if (c.state !== 'open' || !c.tmux) continue
+      const machines = [c.machine, ...c.sessions.map(s => s.machine)]
+      for (const m of machines) {
+        const k = `${id}/${m}`
+        if (seen.has(k)) continue
+        seen.add(k)
+        out.push({ bridgeId: id, machine: m })
+      }
+    }
+    return out
+  }
+
+  /** Create a terminal on a target; resolves to the new fleet key. */
+  async newTerminal(t: TerminalTarget, cwd?: string): Promise<string> {
+    const c = this.clients.get(t.bridgeId)
+    if (!c) throw new Error('no bridge')
+    const id = await c.newTerminal(t.machine === c.machine ? undefined : t.machine, cwd)
+    return `${t.bridgeId}/${id}`
   }
 
   /** True when sessions come from more than one machine (local or relayed). */

@@ -1,4 +1,5 @@
 import { AudioInputSource, OsEventTypeList, waitForEvenAppBridge, type EvenAppBridge } from '@evenrealities/even_hub_sdk'
+import jsQR from 'jsqr'
 import { Display } from './glasses/display'
 import { UI, type ScreenContext } from './glasses/ui'
 import { SessionsScreen } from './glasses/screens/sessions'
@@ -42,10 +43,38 @@ const MENU_ITEMS = [
 // ───────────────────────── phone side first (works even without the Even host) ─────────────────────────
 const fleet = new Fleet()
 let bridges: BridgeEntry[] = mergeBridges(loadBridgesSync(), bridgesFromQuery())
+let hostBridge: EvenAppBridge | null = null
+
+/** Photo → QR text, for pairing with `claudedeck pair`. Needs the `camera` permission. */
+async function scanQr(): Promise<string | null> {
+  if (!hostBridge) throw new Error('Even host not ready yet')
+  const shot = await hostBridge.captureImageFromCamera()
+  if (!shot?.base64) return null
+  const img = new Image()
+  img.src = shot.base64.startsWith('data:') ? shot.base64 : `data:${shot.mimeType || 'image/jpeg'};base64,${shot.base64}`
+  await img.decode()
+  const canvas = document.createElement('canvas')
+  const ctx2d = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx2d) throw new Error('no canvas')
+  // Try a downscaled pass first (fast, tolerant of blur), then near full size.
+  for (const maxDim of [1000, 1800]) {
+    const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight))
+    canvas.width = Math.round(img.naturalWidth * scale)
+    canvas.height = Math.round(img.naturalHeight * scale)
+    ctx2d.drawImage(img, 0, 0, canvas.width, canvas.height)
+    const data = ctx2d.getImageData(0, 0, canvas.width, canvas.height)
+    const hit = jsQR(data.data, data.width, data.height, { inversionAttempts: 'attemptBoth' })
+    if (hit?.data) return hit.data
+    if (scale === 1) break
+  }
+  throw new Error('no QR code found in the photo — get closer, avoid glare, zoom the terminal (Cmd +)')
+}
+
 const phone = mountPhoneUi(
   fleet,
   () => bridges,
   next => (bridges = next),
+  { scanQr },
 )
 if (bridgesFromQuery().length) saveBridges(bridges)
 fleet.configure(bridges)
@@ -59,6 +88,7 @@ window.addEventListener('error', ev => phone.log(`error: ${ev.message}`))
 // ───────────────────────── glasses side ─────────────────────────
 phone.setGlassesState('waiting for Even bridge')
 const evenBridge: EvenAppBridge = await waitForEvenAppBridge()
+hostBridge = evenBridge
 attachStorage(evenBridge)
 phone.setGlassesState('bridge ready, creating page')
 phone.log('Even bridge ready')

@@ -12,7 +12,7 @@ import { createStt } from './stt.js'
 import { RemoteBridge } from './remotes.js'
 import { log } from './log.js'
 
-const VERSION = '0.2.0'
+const VERSION = '0.3.0'
 
 interface Client {
   ws: WebSocket
@@ -21,13 +21,14 @@ interface Client {
   alive: boolean
 }
 
-const ACTION_KEYS: Record<Exclude<SessionAction, 'keys' | 'continue'>, string[]> = {
+const ACTION_KEYS: Record<Exclude<SessionAction, 'keys' | 'continue' | 'kill'>, string[]> = {
   approve: ['y'],
   approve_all: ['2'],
   deny: ['Escape'],
   interrupt: ['Escape'],
   cycle_mode: ['BTab'],
   enter: ['Enter'],
+  ctrl_c: ['C-c'],
 }
 
 const MIME: Record<string, string> = {
@@ -267,7 +268,8 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
         const s = registry.get(msg.sessionId)
         if (!s?.pane) return send(c, { type: 'ack', of: msg.action, ok: false, message: 'no tmux pane for this session' })
         log(`action ${msg.action} → ${s.name} (${s.pane})`)
-        if (msg.action === 'continue') await sendText(s.pane, 'continue', true)
+        if (msg.action === 'kill') await registry.killPaneOf(s.id)
+        else if (msg.action === 'continue') await sendText(s.pane, 'continue', true)
         else if (msg.action === 'keys') await sendKeys(s.pane, (msg.keys ?? '').split(/\s+/).filter(Boolean))
         else await sendKeys(s.pane, ACTION_KEYS[msg.action])
         return send(c, { type: 'ack', of: msg.action, ok: true })
@@ -283,6 +285,18 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
         log(`send "${msg.text.slice(0, 60)}" → ${s.name}`)
         await sendText(s.pane, msg.text, msg.enter !== false)
         return send(c, { type: 'ack', of: 'send', ok: true })
+      }
+      case 'terminal_new': {
+        if (msg.machine && msg.machine !== cfg.machine) {
+          const r = remotes.find(x => x.machine === msg.machine || x.name === msg.machine)
+          if (!r) return send(c, { type: 'ack', of: 'terminal_new', ok: false, message: `no bridge named ${msg.machine}` })
+          if (!r.send({ type: 'terminal_new', cwd: msg.cwd })) send(c, { type: 'ack', of: 'terminal_new', ok: false, message: `remote ${r.name} not connected` })
+          return // the remote's ack (with a namespaced id) is relayed to every client
+        }
+        if (!registry.tmuxAvailable) return send(c, { type: 'ack', of: 'terminal_new', ok: false, message: 'tmux not available on this bridge' })
+        const id = await registry.createTerminal(msg.cwd)
+        log(`terminal ${id} created`)
+        return send(c, { type: 'ack', of: 'terminal_new', ok: true, message: id })
       }
       case 'audio_start':
         // Dictation is always transcribed on the hub, even for remote sessions.

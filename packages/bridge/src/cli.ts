@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
+import qrcode from 'qrcode-terminal'
 import { CONFIG_PATH, MODELS_DIR, loadConfig, saveConfig } from './config.js'
 import { SessionRegistry } from './sessions.js'
 import { startServer } from './server.js'
@@ -19,6 +20,7 @@ const HELP = `claudedeck — bridge between Claude Code sessions and the G2 glas
   claudedeck uninstall-hooks       remove them again
   claudedeck info                  print connection details for the glasses app
   claudedeck url [--copy]          best bridge URL for the app (wss:// when Tailscale Serve fronts the bridge); --copy → clipboard
+  claudedeck pair [--lan|--ts]     QR code that the installed app scans (phone page → Scan QR) to add this bridge
   claudedeck token [--rotate]      print (or rotate) the shared secret
   claudedeck setup-stt [model]     download a whisper.cpp model (default: base.en)
   claudedeck install-service       create a launchd agent so the bridge runs at login (macOS)
@@ -116,15 +118,7 @@ async function main(): Promise<void> {
       return
     }
     case 'url': {
-      const ts = tailscaleInfo()
-      const lan = lanIp()
-      const serve = tailscaleServe(cfg.port)
-      let base: string | undefined
-      if (rest.includes('--lan')) base = lan && `ws://${lan}:${cfg.port}`
-      else if (rest.includes('--ts') || rest.includes('--ws')) base = ts.ip && `ws://${ts.ip}:${cfg.port}`
-      else base = serve ?? (ts.ip ? `ws://${ts.ip}:${cfg.port}` : lan ? `ws://${lan}:${cfg.port}` : undefined)
-      if (!base) throw new Error('no usable address found (no Tailscale Serve, Tailscale IP or LAN IP)')
-      const url = `${base}/ws?token=${cfg.token}`
+      const { url, serve } = bestUrl(cfg, rest)
       console.log(url)
       if (rest.includes('--copy')) {
         const ok = copyToClipboard(url)
@@ -132,6 +126,17 @@ async function main(): Promise<void> {
       } else if (!serve) {
         console.error('(plain ws:// — run `tailscale serve --bg --https=443 http://127.0.0.1:' + cfg.port + '` for a wss:// URL the installed app can use)')
       }
+      return
+    }
+    case 'pair': {
+      const { url, serve } = bestUrl(cfg, rest)
+      // The installed app decodes this with its camera (phone page → Scan QR).
+      const payload = `claudedeck://add?name=${encodeURIComponent(cfg.machine)}&url=${encodeURIComponent(url)}`
+      console.log(`\nPairing QR for ${cfg.machine} — open ClaudeDeck on the phone, tap "Scan QR", point the camera here.\n`)
+      qrcode.setErrorLevel('M')
+      qrcode.generate(payload, { small: true }, (qr: string) => console.log(qr))
+      console.log(`${url.replace(/token=.*/, 'token=…')}${serve ? '' : '   (plain ws:// — see `claudedeck url` for TLS)'}`)
+      console.log('Too small to scan? Zoom the terminal (Cmd +) or use `claudedeck url --copy` and paste on the phone.\n')
       return
     }
     case 'qr': {
@@ -281,6 +286,19 @@ function tailscaleInfo(): { ip?: string; dns?: string } {
     }
   }
   return {}
+}
+
+/** The URL the app should use: Tailscale Serve (wss) when active, else ws:// on the Tailscale IP, else LAN. */
+function bestUrl(cfg: { port: number; token: string }, flags: string[]): { url: string; serve: boolean } {
+  const ts = tailscaleInfo()
+  const lan = lanIp()
+  const serve = tailscaleServe(cfg.port)
+  let base: string | undefined
+  if (flags.includes('--lan')) base = lan && `ws://${lan}:${cfg.port}`
+  else if (flags.includes('--ts') || flags.includes('--ws')) base = ts.ip && `ws://${ts.ip}:${cfg.port}`
+  else base = serve ?? (ts.ip ? `ws://${ts.ip}:${cfg.port}` : lan ? `ws://${lan}:${cfg.port}` : undefined)
+  if (!base) throw new Error('no usable address found (no Tailscale Serve, Tailscale IP or LAN IP)')
+  return { url: `${base}/ws?token=${cfg.token}`, serve: !!serve && base === serve }
 }
 
 /** `wss://<host>` when `tailscale serve` fronts this bridge's port with HTTPS, else undefined. */

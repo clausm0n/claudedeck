@@ -53,6 +53,32 @@ export function bridgesFromQuery(): BridgeEntry[] {
 }
 
 /**
+ * Decode what a scanned QR (or pasted text) says about a bridge:
+ * `claudedeck://add?name=…&url=…` from `claudedeck pair`, a bare ws(s):// URL,
+ * or the dev-sideload app URL carrying `?bridge=…` from `claudedeck qr`.
+ */
+export function parsePairing(text: string): BridgeEntry | null {
+  const t = text.trim()
+  const m = t.match(/^claudedeck:\/\/add\?(.*)$/i)
+  if (m) {
+    const q = new URLSearchParams(m[1])
+    const url = (q.get('url') ?? '').trim()
+    if (!/^wss?:\/\//.test(url)) return null
+    return makeEntry(q.get('name') ?? '', url)
+  }
+  if (/^wss?:\/\//i.test(t)) return makeEntry('', t)
+  if (/^https?:\/\//i.test(t)) {
+    try {
+      const b = new URL(t).searchParams.get('bridge')
+      if (b && /^wss?:\/\//.test(b)) return makeEntry('', b)
+    } catch {
+      /* not a URL */
+    }
+  }
+  return null
+}
+
+/**
  * Later entries win. Two URLs carrying the same token are the same bridge
  * reached via different addresses (LAN vs Tailscale) — keep only the newest
  * so a re-scanned QR replaces a stale address instead of adding a dead twin.

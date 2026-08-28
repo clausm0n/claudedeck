@@ -36,3 +36,13 @@ claude() {
 
 # Reattach to any Claude Code sessions still running in tmux.
 claude-sessions() { tmux list-sessions -F '#{session_name}  #{pane_current_path}  (#{session_attached} attached)' 2>/dev/null | grep '^cc-' || echo 'no claude tmux sessions'; }
+
+# Put the current terminal tab under tmux so the glasses can see it and type
+# into it (ClaudeDeck lists every tmux pane as a terminal). Re-running `deck`
+# with the same name re-attaches. Terminals opened from the glasses are named
+# t1, t2, … — take one over with `tmux attach -t t1`.
+deck() {
+  local name=${1:-"term-$(basename "$PWD" | tr -c 'A-Za-z0-9_.-' '_')"}
+  if [ -n "$TMUX" ]; then echo "already inside tmux"; return 0; fi
+  tmux new-session -A -s "$name" -c "$PWD" \; set-option -t "$name" status off \; set-option -t "$name" mouse on
+}

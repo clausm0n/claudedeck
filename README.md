@@ -91,11 +91,23 @@ npm run app:sim            # evenhub-simulator with automation port 9898
    `evenhub pack --check` to verify the `package_id`).
 4. **Install:** upload the `.ehpk` at <https://hub.evenrealities.com> (developer portal), then open it from the
    Even app (**Even Hub tab → Developer Mode → Me → Apps → Private builds → Install**). A packaged app has no
-   `?bridge=` URL, so add bridges once via the phone page's *Add bridge* form: run `claudedeck url --copy` on the
-   Mac (prints the `wss://` URL and puts it on the clipboard — Universal Clipboard carries it to the iPhone), then
-   long-press → Paste in the URL field. Entries persist in host storage.
+   `?bridge=` URL, so pair it once: run `claudedeck pair` on the machine (prints a QR with the machine name and the
+   `wss://` URL), then on the phone page tap **Scan QR** and point the camera at the terminal. Alternatives:
+   `claudedeck url --copy` + Universal Clipboard paste into *Add bridge*, or type the URL. Entries persist in host storage.
 
 The dev sideload (`evenhub qr`) works with plain `ws://` and needs no TLS.
+
+## Terminals (not just Claude)
+
+Every tmux pane on a bridge machine that is **not** running Claude Code shows up as a terminal row (`$ t1 IDLE 2m  …last
+screen line`), after the Claude sessions. Open one to see its live screen; tap for actions — dictate a command (review the
+transcript, then *Run in terminal* or *Type only*), Ctrl-C, Enter, Esc, full-screen view, and *Kill terminal* (two taps).
+The last rows of the list are `+ new terminal @<machine>` — one per bridge and per relayed machine — which opens a detached
+tmux session (`t1`, `t2`, …) in your home directory. Take it over from any terminal with `tmux attach -t t1`.
+
+Plain terminal tabs are invisible to the bridge until they are inside tmux: `deck` (from `scripts/claude-tmux.sh`) puts the
+current tab under tmux with the status bar off, so it behaves like before but is now visible and controllable from the
+glasses. Set `"terminals": false` in `~/.claudedeck/config.json` to list only Claude sessions.
 
 ## Glasses controls
 

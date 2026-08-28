@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@claudedeck/shared": "*",
+    "qrcode-terminal": "^0.12.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {

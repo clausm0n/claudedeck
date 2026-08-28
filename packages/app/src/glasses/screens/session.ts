@@ -7,7 +7,10 @@ import type { Screen, ScreenContext } from '../ui'
 import { ActionsScreen } from './actions'
 import { DictateScreen } from './dictate'
 
-/** One session: status header, last assistant message paginated in the body. */
+/**
+ * One session: status header, last assistant message paginated in the body.
+ * Terminal rows show the live pane instead (raw rows, newest page by default).
+ */
 export class SessionScreen implements Screen {
   readonly name = 'session'
   private detail: FleetDetail | null = null
@@ -46,10 +49,25 @@ export class SessionScreen implements Screen {
     return this.ctx.fleet.get(this.key)
   }
 
+  private isShell(): boolean {
+    return (this.summary()?.kind ?? this.detail?.kind) === 'shell'
+  }
+
   private rebuildPages(): void {
     const d = this.detail
     const s = this.summary()
     const status = s?.status ?? d?.status
+    if (this.isShell()) {
+      const text = d?.lastAssistant ?? (d ? '' : 'loading...')
+      if (text === this.pagesFor) return
+      this.pagesFor = text
+      const rows = text.split('\n').map(r => fit(r.replace(/\s+$/, ''), LINE_W))
+      const pages: string[] = []
+      for (let i = 0; i < rows.length; i += BODY_LINES) pages.push(rows.slice(i, i + BODY_LINES).join('\n'))
+      this.pages = pages.length ? pages : ['(empty terminal)']
+      if (this.page >= this.pages.length) this.page = this.pages.length - 1
+      return
+    }
     const parts: string[] = []
     if (status === 'needs_permission') {
       const t = s?.tool ?? d?.tool
@@ -103,13 +121,14 @@ export class SessionScreen implements Screen {
     this.rebuildPages()
     const status = s?.status ?? d?.status ?? 'unknown'
     const now = Date.now()
+    const shell = this.isShell()
     const head = [
       s?.name ?? d?.name ?? this.key,
       this.ctx.fleet.multiMachine ? `@${s?.machine ?? ''}` : '',
-      STATUS_LABEL[status],
+      shell ? (status === 'working' ? 'BUSY' : 'IDLE') : STATUS_LABEL[status],
       formatAge(s?.statusSince ?? now, now),
-      s?.model ?? '',
-      typeof s?.contextPct === 'number' ? `ctx ${s.contextPct}%` : '',
+      shell ? (s?.command ?? '') : (s?.model ?? ''),
+      !shell && typeof s?.contextPct === 'number' ? `ctx ${s.contextPct}%` : '',
     ]
       .filter(Boolean)
       .join('  ')

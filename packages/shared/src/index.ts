@@ -17,6 +17,9 @@ export type SessionStatus =
 
 export type SessionSource = 'hook' | 'tmux'
 
+/** A Claude Code session, or a plain tmux pane exposed as a terminal. */
+export type SessionKind = 'claude' | 'shell'
+
 export interface ToolRef {
   name: string
   /** Short human summary, e.g. `npm test` or `src/main.ts`. */
@@ -37,6 +40,10 @@ export interface SessionSummary {
   /** Epoch ms of the last hook/transcript activity. */
   lastActivity: number
   source: SessionSource
+  /** `shell` = a tmux pane not running Claude Code (default `claude`). */
+  kind?: SessionKind
+  /** Foreground command in the pane (terminal rows), e.g. `zsh`, `vim`, `npm`. */
+  command?: string
   /** tmux pane id (`%3`) when the session is reachable for input. */
   pane?: string
   /** Model display name when known (from statusline / transcript). */
@@ -71,6 +78,8 @@ export type SessionAction =
   | 'continue' // types "continue" + Enter
   | 'cycle_mode' // Shift+Tab
   | 'enter'
+  | 'ctrl_c' // C-c
+  | 'kill' // kill the tmux pane (terminal rows)
   | 'keys' // raw tmux key names in `keys`
 
 export type ClientMessage =
@@ -80,6 +89,8 @@ export type ClientMessage =
   | { type: 'action'; sessionId: string; action: SessionAction; keys?: string }
   | { type: 'send'; sessionId: string; text: string; enter?: boolean }
   | { type: 'screen'; sessionId: string; lines?: number }
+  /** Open a detached tmux session; the ack's `message` carries the new session id. `machine` targets a relayed bridge. */
+  | { type: 'terminal_new'; machine?: string; cwd?: string }
   | { type: 'audio_start'; sessionId?: string; sampleRate?: number }
   | { type: 'audio_stop'; sessionId?: string }
   | { type: 'audio_cancel' }
@@ -136,6 +147,9 @@ export const STATUS_RANK: Record<SessionStatus, number> = {
 
 export function sortSessions<T extends SessionSummary>(list: T[]): T[] {
   return [...list].sort((a, b) => {
+    // Claude sessions first, plain terminals after them.
+    const k = (a.kind === 'shell' ? 1 : 0) - (b.kind === 'shell' ? 1 : 0)
+    if (k !== 0) return k
     const r = STATUS_RANK[a.status] - STATUS_RANK[b.status]
     if (r !== 0) return r
     return b.lastActivity - a.lastActivity

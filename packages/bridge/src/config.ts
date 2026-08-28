@@ -26,6 +26,8 @@ export interface BridgeConfig {
   }
   /** How often (ms) to rescan tmux panes for Claude processes. */
   tmuxScanIntervalMs: number
+  /** Expose every tmux pane (not only Claude Code) as a terminal row on the glasses. */
+  terminals: boolean
   /**
    * Other bridges this one relays (hub mode). The phone connects only here;
    * remote sessions appear in the same list tagged with the remote's machine
@@ -57,6 +59,7 @@ function defaults(): BridgeConfig {
         'API, JSON, README, config file, bridge, WebSocket, hook, statusline, glasses, Even Hub, Tailscale.',
     },
     tmuxScanIntervalMs: 4000,
+    terminals: true,
     remotes: [],
   }
 }

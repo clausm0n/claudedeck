@@ -137,6 +137,32 @@ export async function paneRunsClaude(pane: TmuxPane): Promise<boolean> {
   return pane.command === 'claude'
 }
 
+const SHELL_COMMANDS = new Set(['zsh', 'bash', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh', 'nu', 'login', 'tmux'])
+
+/** True when the pane's foreground process is an interactive shell waiting at a prompt. */
+export function isShellCommand(cmd: string): boolean {
+  return SHELL_COMMANDS.has(cmd.replace(/^-/, ''))
+}
+
+export async function listSessionNames(): Promise<string[]> {
+  try {
+    return (await tmux(['list-sessions', '-F', '#{session_name}'])).split('\n').filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+/** Create a detached session and return its first pane id. Sized generously; tmux resizes when a terminal attaches. */
+export async function newSession(name: string, cwd?: string): Promise<string> {
+  const args = ['new-session', '-d', '-s', name, '-x', '120', '-y', '36', '-P', '-F', '#{pane_id}']
+  if (cwd) args.push('-c', cwd)
+  return (await tmux(args)).trim()
+}
+
+export async function killPane(paneId: string): Promise<void> {
+  await tmux(['kill-pane', '-t', paneId])
+}
+
 /** Last `lines` rows of the pane, joined-wrapped, trailing blanks trimmed. */
 export async function capturePane(paneId: string, lines = 40): Promise<string[]> {
   const out = await tmux(['capture-pane', '-p', '-J', '-t', paneId, '-S', `-${lines}`])

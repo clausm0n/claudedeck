@@ -120,7 +120,9 @@ export class RemoteBridge extends EventEmitter {
         this.screenWaiters.splice(0).forEach(fn => fn(msg.lines))
         break
       case 'ack':
-        this.emit('ack', msg)
+        // A new terminal's id travels in the ack; namespace it like the sessions.
+        if (msg.of === 'terminal_new' && msg.ok && msg.message) this.emit('ack', { ...msg, message: this.prefix(msg.message) })
+        else this.emit('ack', msg)
         break
       case 'error':
         this.lastError = msg.message

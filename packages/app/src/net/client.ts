@@ -41,6 +41,7 @@ export class BridgeClient extends Emitter<ClientEvents> {
   private closedByUser = false
   private subscribed: string | null = null
   private screenWaiters: Array<(lines: string[]) => void> = []
+  private terminalWaiters: Array<(a: { ok: boolean; message?: string }) => void> = []
   private lastMessageAt = 0
   private stallTimer: number | null = null
 
@@ -188,6 +189,7 @@ export class BridgeClient extends Emitter<ClientEvents> {
         this.emit('transcript', { sessionId: msg.sessionId, text: msg.text, seconds: msg.seconds })
         break
       case 'ack':
+        if (msg.of === 'terminal_new') this.terminalWaiters.splice(0).forEach(fn => fn({ ok: msg.ok, message: msg.message }))
         this.emit('ack', { of: msg.of, ok: msg.ok, message: msg.message })
         break
       case 'error':
@@ -235,6 +237,23 @@ export class BridgeClient extends Emitter<ClientEvents> {
         resolve(lines)
       }
       this.screenWaiters.push(done)
+    })
+  }
+
+  /** Open a detached tmux session on this bridge (or a relayed `machine`); resolves to the new session id. */
+  newTerminal(machine?: string, cwd?: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      if (!this.send({ type: 'terminal_new', machine, cwd })) return reject(new Error('not connected'))
+      const timer = window.setTimeout(() => {
+        this.terminalWaiters = this.terminalWaiters.filter(fn => fn !== done)
+        reject(new Error('bridge did not answer'))
+      }, 10_000)
+      const done = (a: { ok: boolean; message?: string }) => {
+        clearTimeout(timer)
+        if (a.ok && a.message) resolve(a.message)
+        else reject(new Error(a.message ?? 'failed'))
+      }
+      this.terminalWaiters.push(done)
     })
   }
 

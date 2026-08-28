@@ -1,9 +1,10 @@
 import { EventEmitter } from 'node:events'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
-import type { SessionDetail, SessionStatus, SessionSummary, ToolRef } from '@claudedeck/shared'
+import type { SessionDetail, SessionKind, SessionStatus, SessionSummary, ToolRef } from '@claudedeck/shared'
 import type { BridgeConfig } from './config.js'
-import { capturePane, claudePidAmong, listPanes, paneRunsClaude, pidAlive, type TmuxPane } from './tmux.js'
+import { capturePane, claudePidAmong, isShellCommand, killPane, listPanes, listSessionNames, newSession, paneRunsClaude, pidAlive, type TmuxPane } from './tmux.js'
 import { findTranscriptForCwd, parseTranscript, summarizeToolInput, type TranscriptInfo } from './transcript.js'
 import { log } from './log.js'
 
@@ -57,6 +58,10 @@ interface Session extends SessionDetail {
   lastHookAt?: number
   /** Consecutive scans in which the pane no longer runs claude. */
   paneMisses?: number
+  kind?: SessionKind
+  command?: string
+  /** Last rendered terminal text (terminal rows) — change detection for broadcasts. */
+  screenText?: string
 }
 
 type Meta = { tmuxPane?: string; ancestors?: number[] }
@@ -92,6 +97,29 @@ export class SessionRegistry extends EventEmitter {
     if (this.scanTimer) clearInterval(this.scanTimer)
   }
 
+  /** Rescan immediately (after creating/killing a pane) so the next broadcast is current. */
+  async scanNow(): Promise<void> {
+    await this.scanTmux()
+  }
+
+  /** Open a detached tmux session (`t1`, `t2`, …) and return its terminal row id. */
+  async createTerminal(cwd?: string): Promise<string> {
+    const names = new Set(await listSessionNames())
+    let n = 1
+    while (names.has(`t${n}`)) n++
+    const pane = await newSession(`t${n}`, cwd || os.homedir())
+    await this.scanTmux()
+    return `term:${pane}`
+  }
+
+  /** Kill the pane behind a session/terminal row. */
+  async killPaneOf(id: string): Promise<void> {
+    const s = this.sessions.get(id)
+    if (!s?.pane) throw new Error('no tmux pane')
+    await killPane(s.pane)
+    await this.scanTmux()
+  }
+
   // ───────────────────────── queries ─────────────────────────
 
   list(): SessionSummary[] {
@@ -105,7 +133,7 @@ export class SessionRegistry extends EventEmitter {
   /** Raw internal state for /debug (loopback only). */
   dump(): Record<string, unknown>[] {
     return [...this.sessions.values()].map(s => ({
-      id: s.id, name: s.name, status: s.status, source: s.source, pane: s.pane, pid: s.pid,
+      id: s.id, name: s.name, status: s.status, source: s.source, kind: s.kind, pane: s.pane, pid: s.pid,
       lastSeenAgo: s.lastSeen ? Math.round((Date.now() - s.lastSeen) / 1000) : null,
       lastHookAgo: s.lastHookAt ? Math.round((Date.now() - s.lastHookAt) / 1000) : null,
       paneMisses: s.paneMisses, endedAt: s.endedAt, transcript: s.transcriptPath?.split('/').pop(),
@@ -129,6 +157,8 @@ export class SessionRegistry extends EventEmitter {
       statusSince: s.statusSince,
       lastActivity: s.lastActivity,
       source: s.source,
+      kind: s.kind,
+      command: s.command,
       pane: s.pane,
       model: s.model,
       contextPct: s.contextPct,
@@ -442,8 +472,11 @@ export class SessionRegistry extends EventEmitter {
     const paneIds = new Set(claudePanes.map(p => p.id))
     const now = Date.now()
 
+    await this.syncTerminals(panes, paneIds)
+
     // Attach panes to hook sessions that lack one (match by cwd when unique).
     for (const s of this.sessions.values()) {
+      if (s.kind === 'shell') continue // terminal rows are reconciled in syncTerminals
       if (s.pane && !paneIds.has(s.pane)) {
         // The pane no longer runs claude (or is gone). Two consecutive misses
         // (the process table is cached) mean the session really exited.
@@ -505,6 +538,7 @@ export class SessionRegistry extends EventEmitter {
 
     // Liveness + screen heuristics + housekeeping.
     for (const [id, s] of this.sessions) {
+      if (s.kind === 'shell') continue
       if (s.status !== 'ended' && s.source === 'hook') {
         const processGone = s.pid !== undefined && !pidAlive(s.pid)
         const silent = s.pid === undefined && !s.pane && !!s.lastSeen && now - s.lastSeen > SILENT_MS
@@ -536,8 +570,50 @@ export class SessionRegistry extends EventEmitter {
   }
 
   private paneClaimed(paneId: string): boolean {
-    for (const s of this.sessions.values()) if (s.pane === paneId && s.status !== 'ended') return true
+    for (const s of this.sessions.values()) if (s.kind !== 'shell' && s.pane === paneId && s.status !== 'ended') return true
     return false
+  }
+
+  /**
+   * Every pane that is not running Claude becomes a terminal row (`term:%N`):
+   * name = tmux session (`:window` when not the first), status = BUSY while a
+   * non-shell command is in the foreground, body = the last screen rows.
+   */
+  private async syncTerminals(panes: TmuxPane[], claudePaneIds: Set<string>): Promise<void> {
+    const wanted = new Map<string, TmuxPane>()
+    if (this.cfg.terminals !== false) {
+      for (const p of panes) if (!claudePaneIds.has(p.id)) wanted.set(`term:${p.id}`, p)
+    }
+    for (const [id, s] of this.sessions) {
+      if (s.kind === 'shell' && !wanted.has(id)) {
+        this.sessions.delete(id)
+        this.markChanged(id)
+      }
+    }
+    for (const [id, p] of wanted) {
+      const existing = this.sessions.get(id)
+      const name = p.windowIndex > 0 ? `${p.session}:${p.windowIndex}` : p.session
+      const s = this.upsert(id, { cwd: p.cwd, pane: p.id, source: 'tmux', kind: 'shell', command: p.command, name })
+      if (!existing) {
+        s.status = isShellCommand(p.command) ? 'idle' : 'working'
+        s.statusSince = Date.now()
+      }
+      let rows: string[]
+      try {
+        rows = await capturePane(p.id, 30)
+      } catch {
+        continue
+      }
+      while (rows.length && !rows[rows.length - 1].trim()) rows.pop()
+      const text = rows.join('\n')
+      const last = [...rows].reverse().find(r => r.trim())?.trim() ?? ''
+      const status: SessionStatus = isShellCommand(p.command) ? 'idle' : 'working'
+      const changed = !existing || text !== s.screenText || status !== s.status || name !== s.name
+      s.screenText = text
+      s.lastAssistant = text
+      s.lastLine = last.length > 120 ? last.slice(0, 119) + '…' : last
+      if (changed) this.touch(s, status)
+    }
   }
 
   private async applyScreenHeuristics(s: Session): Promise<void> {

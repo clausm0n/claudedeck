@@ -123,11 +123,28 @@ export class DictateScreen implements Screen {
     return true
   }
 
+  private isShell(): boolean {
+    return this.ctx.fleet.get(this.key)?.kind === 'shell'
+  }
+
   private reviewItems(): Array<{ label: string; run: () => void }> {
     const readOnly = !this.ctx.fleet.get(this.key)?.pane
+    const shell = this.isShell()
+    const typeOnly = shell
+      ? [
+          {
+            label: 'Type only (no Enter)',
+            run: () => {
+              const ok = this.ctx.fleet.sendText(this.key, this.text, false)
+              this.ctx.ui.toast(ok ? 'typed' : 'not connected')
+              this.ctx.ui.pop()
+            },
+          },
+        ]
+      : []
     return [
       {
-        label: readOnly ? 'Send (unavailable: not in tmux)' : 'Send to Claude',
+        label: readOnly ? 'Send (unavailable: not in tmux)' : shell ? 'Run in terminal' : 'Send to Claude',
         run: () => {
           if (readOnly) {
             this.ctx.ui.toast('read-only: relaunch claude in a new shell (tmux wrapper)', 4000)
@@ -138,6 +155,7 @@ export class DictateScreen implements Screen {
           this.ctx.ui.pop()
         },
       },
+      ...typeOnly,
       { label: 'Retry', run: () => this.ctx.ui.replace(new DictateScreen(this.ctx, this.key, this.opts)) },
       { label: 'Cancel', run: () => this.ctx.ui.pop() },
     ]
@@ -154,7 +172,7 @@ export class DictateScreen implements Screen {
         const kb = Math.round(this.bytes / 1024)
         return {
           header: fit(`${name}  listening ${secs}s`, LINE_W),
-          body: `Speak your prompt.\n\n${'#'.repeat(Math.min(40, secs))}\n${kb} KB captured`,
+          body: `${this.isShell() ? 'Say a shell command.' : 'Speak your prompt.'}\n\n${'#'.repeat(Math.min(40, secs))}\n${kb} KB captured`,
           footer: this.opts.pushToTalk ? 'release: transcribe   double-tap: cancel' : 'tap: stop & transcribe   double-tap: cancel',
         }
       }

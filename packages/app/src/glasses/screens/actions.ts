@@ -17,6 +17,7 @@ export class ActionsScreen implements Screen {
   private cursor = 0
   private top = 0
   private unsub: Array<() => void> = []
+  private confirmKill = false
 
   constructor(private ctx: ScreenContext, private key: string) {}
 
@@ -43,6 +44,29 @@ export class ActionsScreen implements Screen {
       },
     })
     const items: Item[] = []
+    if (s?.kind === 'shell') {
+      items.push({
+        label: this.ctx.fleet.sttAvailable(this.key) ? 'Dictate a command' : 'Dictate a command  (STT not set up)',
+        run: () => this.ctx.ui.push(new DictateScreen(this.ctx, this.key, { pushToTalk: false })),
+      })
+      items.push({ label: 'Full terminal', run: () => this.ctx.ui.push(new RawScreen(this.ctx, this.key)) })
+      items.push(act('Ctrl-C', 'ctrl_c', false))
+      items.push(act('Press Enter', 'enter', false))
+      items.push(act('Send Esc', 'interrupt', false))
+      items.push({
+        label: this.confirmKill ? 'Kill terminal  (tap again to confirm)' : 'Kill terminal',
+        run: () => {
+          if (!this.confirmKill) {
+            this.confirmKill = true
+            return
+          }
+          runAction(this.ctx, this.key, 'kill', 'kill terminal')
+          this.ctx.ui.popTo('sessions')
+        },
+      })
+      items.push({ label: 'Back', run: () => this.ctx.ui.pop() })
+      return items
+    }
     if (status === 'needs_permission') {
       items.push(act('Approve  (y)', 'approve'))
       items.push(act('Approve all similar  (2)', 'approve_all'))
@@ -67,6 +91,7 @@ export class ActionsScreen implements Screen {
   }
 
   onScroll(dir: 'up' | 'down'): void {
+    this.confirmKill = false
     const n = this.items().length
     this.cursor = dir === 'up' ? Math.max(0, this.cursor - 1) : Math.min(n - 1, this.cursor + 1)
     if (this.cursor < this.top) this.top = this.cursor

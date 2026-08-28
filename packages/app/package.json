@@ -15,7 +15,8 @@
   "dependencies": {
     "@claudedeck/shared": "*",
     "@evenrealities/even_hub_sdk": "^0.0.14",
-    "@evenrealities/pretext": "latest"
+    "@evenrealities/pretext": "latest",
+    "jsqr": "^1.4.0"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

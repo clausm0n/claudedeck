@@ -1,11 +1,16 @@
 import type { BridgeClient } from './net/client'
 import type { Fleet, FleetSession } from './net/fleet'
 import type { Frame } from './glasses/display'
-import { makeEntry, saveBridges } from './storage'
+import { makeEntry, parsePairing, saveBridges } from './storage'
 import type { BridgeEntry } from './net/client'
 
+export interface PhoneUiOptions {
+  /** Take a photo with the phone camera and return the decoded QR text (null when cancelled). */
+  scanQr?: () => Promise<string | null>
+}
+
 /** Phone-side companion page: bridge configuration, status, glasses mirror. */
-export function mountPhoneUi(fleet: Fleet, getBridges: () => BridgeEntry[], setBridges: (b: BridgeEntry[]) => void) {
+export function mountPhoneUi(fleet: Fleet, getBridges: () => BridgeEntry[], setBridges: (b: BridgeEntry[]) => void, opts: PhoneUiOptions = {}) {
   const app = document.querySelector<HTMLDivElement>('#app')!
   app.innerHTML = `
     <div class="wrap">
@@ -21,8 +26,9 @@ export function mountPhoneUi(fleet: Fleet, getBridges: () => BridgeEntry[], setB
           <input id="bName" placeholder="Name (e.g. modusbook)" />
           <input id="bUrl" placeholder="ws://100.x.y.z:7788/ws?token=..." inputmode="url" />
           <button class="primary" type="submit">Add bridge</button>
+          <button type="button" id="scanQr">Scan QR</button>
         </form>
-        <p class="muted">Run <code>claudedeck info</code> on each machine to get its URL. Tip: append <code>?bridge=&lt;url-encoded ws url&gt;</code> to this page's URL to add one automatically.</p>
+        <p class="muted">Run <code>claudedeck pair</code> on a machine and tap <b>Scan QR</b>, or paste the URL from <code>claudedeck url --copy</code>.</p>
       </section>
 
       <section class="card">
@@ -79,22 +85,50 @@ export function mountPhoneUi(fleet: Fleet, getBridges: () => BridgeEntry[], setB
     renderBridges()
   })
 
-  app.querySelector<HTMLFormElement>('#addForm')!.addEventListener('submit', ev => {
-    ev.preventDefault()
-    const name = app.querySelector<HTMLInputElement>('#bName')!
-    const url = app.querySelector<HTMLInputElement>('#bUrl')!
-    if (!/^wss?:\/\//.test(url.value.trim())) {
-      log('bridge URL must start with ws:// or wss://')
-      return
-    }
-    const entry = makeEntry(name.value, url.value)
+  const addEntry = (entry: BridgeEntry) => {
     const next = [...getBridges().filter(e => e.url !== entry.url), entry]
     setBridges(next)
     saveBridges(next)
     fleet.configure(next)
+    renderBridges()
+    log(`added bridge ${entry.name} (${maskToken(entry.url)})`)
+  }
+
+  app.querySelector<HTMLFormElement>('#addForm')!.addEventListener('submit', ev => {
+    ev.preventDefault()
+    const name = app.querySelector<HTMLInputElement>('#bName')!
+    const url = app.querySelector<HTMLInputElement>('#bUrl')!
+    const pasted = parsePairing(url.value)
+    if (!pasted) {
+      log('bridge URL must start with ws:// or wss:// (or paste the claudedeck:// pairing text)')
+      return
+    }
+    addEntry(name.value.trim() ? makeEntry(name.value, pasted.url) : pasted)
     name.value = ''
     url.value = ''
-    renderBridges()
+  })
+
+  const scanBtn = app.querySelector<HTMLButtonElement>('#scanQr')!
+  scanBtn.addEventListener('click', async () => {
+    if (!opts.scanQr) {
+      log('QR scanning needs the Even host (open this page inside the Even app)')
+      return
+    }
+    scanBtn.disabled = true
+    log('opening the camera — fill the frame with the QR from `claudedeck pair`')
+    try {
+      const text = await opts.scanQr()
+      if (text === null) log('scan cancelled / no photo')
+      else {
+        const entry = parsePairing(text)
+        if (entry) addEntry(entry)
+        else log(`QR decoded but it is not a ClaudeDeck pairing code: ${text.slice(0, 60)}`)
+      }
+    } catch (err) {
+      log(`scan failed: ${(err as Error).message ?? err}`)
+    } finally {
+      scanBtn.disabled = false
+    }
   })
 
   const lines: string[] = []
