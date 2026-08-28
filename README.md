@@ -90,8 +90,10 @@ npm run app:sim            # evenhub-simulator with automation port 9898
 3. **Build and pack:** `npm run app:pack` → `packages/app/claudedeck.ehpk` (`evenhub login` first if you want
    `evenhub pack --check` to verify the `package_id`).
 4. **Install:** upload the `.ehpk` at <https://hub.evenrealities.com> (developer portal), then open it from the
-   Even app. A packaged app has no `?bridge=` URL, so add bridges once via the phone page's *Add bridge* form
-   (paste the `wss://` URL from `claudedeck info`); they persist in host storage.
+   Even app (**Even Hub tab → Developer Mode → Me → Apps → Private builds → Install**). A packaged app has no
+   `?bridge=` URL, so add bridges once via the phone page's *Add bridge* form: run `claudedeck url --copy` on the
+   Mac (prints the `wss://` URL and puts it on the clipboard — Universal Clipboard carries it to the iPhone), then
+   long-press → Paste in the URL field. Entries persist in host storage.
 
 The dev sideload (`evenhub qr`) works with plain `ws://` and needs no TLS.
 

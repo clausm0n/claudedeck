@@ -18,6 +18,7 @@ const HELP = `claudedeck — bridge between Claude Code sessions and the G2 glas
   claudedeck install-hooks         add ClaudeDeck hooks (+ statusline if free) to ~/.claude/settings.json
   claudedeck uninstall-hooks       remove them again
   claudedeck info                  print connection details for the glasses app
+  claudedeck url [--copy]          best bridge URL for the app (wss:// when Tailscale Serve fronts the bridge); --copy → clipboard
   claudedeck token [--rotate]      print (or rotate) the shared secret
   claudedeck setup-stt [model]     download a whisper.cpp model (default: base.en)
   claudedeck install-service       create a launchd agent so the bridge runs at login (macOS)
@@ -91,16 +92,20 @@ async function main(): Promise<void> {
       console.log(`port    : ${cfg.port}`)
       console.log(`token   : ${cfg.token}`)
       console.log('')
+      const serve = tailscaleServe(cfg.port)
       console.log('Bridge URLs to enter in the ClaudeDeck app (phone page):')
+      if (serve) console.log(`  ${serve}/ws?token=${cfg.token}        (Tailscale Serve, TLS — use this for the installed app)`)
       if (ts.ip) console.log(`  ws://${ts.ip}:${cfg.port}/ws?token=${cfg.token}        (Tailscale IP)`)
       if (ts.dns) console.log(`  ws://${ts.dns}:${cfg.port}/ws?token=${cfg.token}        (MagicDNS)`)
       if (lan) console.log(`  ws://${lan}:${cfg.port}/ws?token=${cfg.token}        (LAN)`)
-      if (ts.dns) {
+      if (ts.dns && !serve) {
         console.log('')
         console.log('For TLS (needed once the app is packaged, not for dev sideload):')
         console.log(`  tailscale serve --bg --https=443 http://127.0.0.1:${cfg.port}`)
         console.log(`  → wss://${ts.dns}/ws?token=${cfg.token}`)
       }
+      console.log('')
+      console.log('Quickest way onto the phone: `claudedeck url --copy`, then paste into Add bridge (Universal Clipboard).')
       console.log('')
       const host = ts.ip ?? lan
       if (host) console.log(`Glasses app (served by this bridge, no dev server needed):\n  ${appUrl(host, cfg)}\n  → claudedeck qr`)
@@ -108,6 +113,25 @@ async function main(): Promise<void> {
       console.log(`Hooks installed: ${hooksInstalled(cfg.claudeConfigDir) ? 'yes' : 'no (run: claudedeck install-hooks)'}`)
       console.log(`Hook events: ${HOOK_EVENTS.length}`)
       console.log(`Remotes: ${cfg.remotes.length ? cfg.remotes.map(r => `${r.name} (${r.url.replace(/token=.*/, 'token=…')})`).join(', ') : 'none'}`)
+      return
+    }
+    case 'url': {
+      const ts = tailscaleInfo()
+      const lan = lanIp()
+      const serve = tailscaleServe(cfg.port)
+      let base: string | undefined
+      if (rest.includes('--lan')) base = lan && `ws://${lan}:${cfg.port}`
+      else if (rest.includes('--ts') || rest.includes('--ws')) base = ts.ip && `ws://${ts.ip}:${cfg.port}`
+      else base = serve ?? (ts.ip ? `ws://${ts.ip}:${cfg.port}` : lan ? `ws://${lan}:${cfg.port}` : undefined)
+      if (!base) throw new Error('no usable address found (no Tailscale Serve, Tailscale IP or LAN IP)')
+      const url = `${base}/ws?token=${cfg.token}`
+      console.log(url)
+      if (rest.includes('--copy')) {
+        const ok = copyToClipboard(url)
+        console.error(ok ? '(copied to clipboard — paste it into the phone page, Universal Clipboard reaches the iPhone)' : '(no clipboard tool found: pbcopy / wl-copy / xclip)')
+      } else if (!serve) {
+        console.error('(plain ws:// — run `tailscale serve --bg --https=443 http://127.0.0.1:' + cfg.port + '` for a wss:// URL the installed app can use)')
+      }
       return
     }
     case 'qr': {
@@ -257,6 +281,37 @@ function tailscaleInfo(): { ip?: string; dns?: string } {
     }
   }
   return {}
+}
+
+/** `wss://<host>` when `tailscale serve` fronts this bridge's port with HTTPS, else undefined. */
+function tailscaleServe(port: number): string | undefined {
+  const bins = ['tailscale', '/opt/homebrew/bin/tailscale', '/Applications/Tailscale.app/Contents/MacOS/Tailscale']
+  for (const b of bins) {
+    try {
+      const st = JSON.parse(execFileSync(b, ['serve', 'status', '--json'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString()) as {
+        Web?: Record<string, { Handlers?: Record<string, { Proxy?: string }> }>
+      }
+      for (const [hostPort, site] of Object.entries(st.Web ?? {})) {
+        for (const h of Object.values(site.Handlers ?? {})) {
+          if (h.Proxy && /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(h.Proxy) && new URL(h.Proxy).port === String(port)) {
+            return `wss://${hostPort.replace(/:443$/, '')}`
+          }
+        }
+      }
+      return undefined
+    } catch {
+      /* try next */
+    }
+  }
+  return undefined
+}
+
+function copyToClipboard(text: string): boolean {
+  for (const [bin, args] of [['pbcopy', []], ['wl-copy', []], ['xclip', ['-selection', 'clipboard']]] as Array<[string, string[]]>) {
+    const r = spawnSync(bin, args, { input: text, stdio: ['pipe', 'ignore', 'ignore'] })
+    if (!r.error && r.status === 0) return true
+  }
+  return false
 }
 
 function lanIp(): string | undefined {
