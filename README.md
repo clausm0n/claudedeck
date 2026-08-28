@@ -32,7 +32,8 @@ terminal on your machine); ClaudeDeck only watches and pokes them.
 
 ```bash
 npm install && npm run build
-CLI="node $PWD/packages/bridge/dist/cli.js"
+npm link -w @claudedeck/bridge   # puts `claudedeck` on your PATH (or: printf '#!/bin/sh\nexec node %s/packages/bridge/dist/cli.js "$@"\n' "$PWD" > ~/.local/bin/claudedeck && chmod +x ~/.local/bin/claudedeck)
+CLI=claudedeck
 
 $CLI install-hooks        # hooks + statusline into ~/.claude/settings.json (backup kept)
 $CLI install-service      # launchd agent: bridge runs at login and restarts if it dies
