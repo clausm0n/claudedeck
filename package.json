@@ -1,0 +1,26 @@
+{
+  "name": "claudedeck",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Manage your Claude Code sessions from Even Realities G2 glasses over Tailscale.",
+  "type": "module",
+  "workspaces": [
+    "packages/shared",
+    "packages/bridge",
+    "packages/app"
+  ],
+  "scripts": {
+    "build": "npm run build -w @claudedeck/shared && npm run build -w @claudedeck/bridge && npm run build -w @claudedeck/app",
+    "build:shared": "npm run build -w @claudedeck/shared",
+    "bridge": "npm run start -w @claudedeck/bridge",
+    "bridge:dev": "npm run dev -w @claudedeck/bridge",
+    "app:dev": "npm run dev -w @claudedeck/app",
+    "app:sim": "npm run simulate -w @claudedeck/app",
+    "app:qr": "node packages/app/scripts/qr.mjs",
+    "app:pack": "npm run pack -w @claudedeck/app",
+    "typecheck": "npm run typecheck -ws --if-present"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

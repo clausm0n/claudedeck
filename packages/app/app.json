@@ -1,0 +1,25 @@
+{
+  "package_id": "com.modus.claudedeck",
+  "edition": "202601",
+  "name": "ClaudeDeck",
+  "version": "0.1.0",
+  "min_app_version": "2.2.9",
+  "min_sdk_version": "0.0.14",
+  "entrypoint": "index.html",
+  "permissions": [
+    {
+      "name": "network",
+      "desc": "Connects to your own ClaudeDeck bridge over Tailscale or LAN to read and control Claude Code sessions.",
+      "whitelist": [
+        "ws://100.77.70.83:7788",
+        "wss://modusbook.tailf19aa8.ts.net",
+        "ws://192.168.1.119:7788"
+      ]
+    },
+    {
+      "name": "g2-microphone",
+      "desc": "Dictate prompts to Claude Code using the glasses microphone."
+    }
+  ],
+  "supported_languages": ["en"]
+}

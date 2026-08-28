@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.ehpk
+.env
+.env.local
+.DS_Store
+*.log
+packages/app/app.local.json

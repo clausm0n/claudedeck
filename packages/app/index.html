@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no" />
+    <title>ClaudeDeck</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body {
+        margin: 0; height: 100%;
+        background: #232323; color: #E5E5E5;
+        font: 15px/1.45 -apple-system, BlinkMacSystemFont, 'Helvetica Neue', system-ui, sans-serif;
+        touch-action: manipulation; -webkit-text-size-adjust: 100%; overscroll-behavior: none;
+      }
+      #app { min-height: 100%; }
+      .wrap { max-width: 680px; margin: 0 auto; padding: 20px 18px 40px; box-sizing: border-box; display: flex; flex-direction: column; gap: 16px; }
+      header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+      h1 { font-size: 20px; font-weight: 650; margin: 0; letter-spacing: 0.01em; }
+      h2 { font-size: 12px; font-weight: 600; margin: 0 0 8px; color: #919191; text-transform: uppercase; letter-spacing: 0.08em; }
+      .muted { color: #919191; font-size: 12px; }
+      .card { background: #2E2E2E; border: 1px solid #3E3E3E; border-radius: 12px; padding: 14px 16px; }
+      .chip { display: inline-block; font-size: 11px; padding: 3px 9px; border-radius: 999px; border: 1px solid #3E3E3E; letter-spacing: 0.05em; text-transform: uppercase; color: #A7A7A7; }
+      .chip.open { color: #3CFA44; border-color: #3CFA44; background: rgba(60,250,68,0.08); }
+      .chip.connecting { color: #E5C34A; border-color: #E5C34A; }
+      .chip.closed { color: #FF453A; border-color: #FF453A; }
+      .row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid #3A3A3A; }
+      .row:first-of-type { border-top: 0; }
+      .row .grow { flex: 1; min-width: 0; }
+      .row .name { font-weight: 600; }
+      .row .url { font-size: 11px; color: #7B7B7B; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      button { background: #3E3E3E; color: #E5E5E5; border: 1px solid #4A4A4A; border-radius: 8px; padding: 8px 12px; font: inherit; font-size: 13px; }
+      button.primary { background: #3CFA44; color: #111; border-color: #3CFA44; font-weight: 600; }
+      button.danger { color: #FF453A; }
+      form { display: grid; grid-template-columns: 1fr; gap: 8px; }
+      input { background: #232323; color: #E5E5E5; border: 1px solid #4A4A4A; border-radius: 8px; padding: 9px 11px; font: inherit; font-size: 14px; width: 100%; box-sizing: border-box; }
+      pre.glass { background: #0f1a10; color: #3CFA44; border: 1px solid #234; border-radius: 10px; padding: 12px; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; margin: 0; min-height: 120px; }
+      pre.glass .hdr, pre.glass .ftr { color: #7fbf83; }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      td { padding: 6px 4px; border-top: 1px solid #3A3A3A; vertical-align: top; }
+      td.st { white-space: nowrap; font-weight: 600; }
+      td.st.needs_permission { color: #E5C34A; }
+      td.st.working { color: #3CFA44; }
+      td.st.idle { color: #A7A7A7; }
+      td.st.error, td.st.ended { color: #FF453A; }
+      .log { font: 11px/1.4 ui-monospace, Menlo, monospace; color: #A7A7A7; max-height: 160px; overflow: auto; white-space: pre-wrap; }
+      code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; background: #1c1c1c; padding: 1px 5px; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

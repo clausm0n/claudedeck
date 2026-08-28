@@ -1,0 +1,30 @@
+{
+  "name": "@claudedeck/bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ClaudeDeck bridge: exposes local Claude Code sessions (hooks + tmux + transcripts) over WebSocket for the G2 glasses app.",
+  "type": "module",
+  "bin": {
+    "claudedeck": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/cli.js start",
+    "dev": "tsx watch src/cli.ts start",
+    "install-hooks": "node dist/cli.js install-hooks"
+  },
+  "dependencies": {
+    "@claudedeck/shared": "*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
