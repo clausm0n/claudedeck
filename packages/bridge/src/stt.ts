@@ -10,8 +10,8 @@ const execFileP = promisify(execFile)
 export interface SttBackend {
   readonly name: string
   available(): Promise<boolean>
-  /** PCM s16le mono 16 kHz → text. */
-  transcribe(pcm: Buffer, sampleRate: number): Promise<string>
+  /** PCM s16le mono 16 kHz → text. `prompt` overrides the configured vocabulary bias. */
+  transcribe(pcm: Buffer, sampleRate: number, prompt?: string): Promise<string>
 }
 
 /** Wrap raw PCM in a 44-byte RIFF header so whisper-cli can read it. */
@@ -67,7 +67,7 @@ class WhisperCpp implements SttBackend {
     return !!(await this.resolveBinary()) && fs.existsSync(this.cfg.model)
   }
 
-  async transcribe(pcm: Buffer, sampleRate: number): Promise<string> {
+  async transcribe(pcm: Buffer, sampleRate: number, prompt?: string): Promise<string> {
     const bin = await this.resolveBinary()
     if (!bin) throw new Error('whisper-cli not found (brew install whisper-cpp)')
     if (!fs.existsSync(this.cfg.model)) throw new Error(`whisper model missing: ${this.cfg.model} (run: claudedeck setup-stt)`)
@@ -76,7 +76,8 @@ class WhisperCpp implements SttBackend {
     fs.writeFileSync(wav, pcmToWav(pcm, sampleRate))
     try {
       const args = ['-m', this.cfg.model, '-f', wav, '-l', this.cfg.language || 'en', '--no-timestamps', '--no-prints', '-t', String(Math.max(2, Math.min(8, os.cpus().length)))]
-      if (this.cfg.prompt) args.push('--prompt', this.cfg.prompt)
+      const bias = prompt ?? this.cfg.prompt
+      if (bias) args.push('--prompt', bias)
       const { stdout } = await execFileP(bin, args, { maxBuffer: 4 * 1024 * 1024, timeout: 120_000 })
       return stdout
         .split('\n')

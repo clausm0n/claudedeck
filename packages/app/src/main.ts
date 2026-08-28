@@ -42,7 +42,9 @@ const MENU_ITEMS = [
 
 // ───────────────────────── phone side first (works even without the Even host) ─────────────────────────
 const fleet = new Fleet()
-let bridges: BridgeEntry[] = mergeBridges(loadBridgesSync(), bridgesFromQuery())
+/** `?reset=1` ignores stored bridges (demos, screenshots, a stuck config). */
+const RESET = new URLSearchParams(window.location.search).has('reset')
+let bridges: BridgeEntry[] = RESET ? bridgesFromQuery() : mergeBridges(loadBridgesSync(), bridgesFromQuery())
 let hostBridge: EvenAppBridge | null = null
 
 function decodeFrame(ctx2d: CanvasRenderingContext2D, canvas: HTMLCanvasElement): string | null {
@@ -262,7 +264,7 @@ const phone = mountPhoneUi(
   next => (bridges = next),
   { scanQr, scanAlbum },
 )
-if (bridgesFromQuery().length) saveBridges(bridges)
+if (bridgesFromQuery().length && !RESET) saveBridges(bridges)
 fleet.configure(bridges)
 phone.log(`configured ${bridges.length} bridge(s)`)
 
@@ -280,7 +282,7 @@ phone.setGlassesState('bridge ready, creating page')
 phone.log('Even bridge ready')
 
 // Host-side storage may hold bridges that window.localStorage lost.
-const hostBridges = await loadBridgesFromHost().catch(() => null)
+const hostBridges = RESET ? null : await loadBridgesFromHost().catch(() => null)
 if (hostBridges && hostBridges.length) {
   bridges = mergeBridges(hostBridges, bridges)
   saveBridges(bridges)

@@ -9,6 +9,7 @@ import type { BridgeConfig } from './config.js'
 import { SessionRegistry, type HookPayload, type StatuslinePayload } from './sessions.js'
 import { capturePane, lastTmuxError, listPanes, paneRunsClaude, sendKeys, sendText } from './tmux.js'
 import { createStt } from './stt.js'
+import { refineWithClaude, spokenToCommand } from './command.js'
 import { RemoteBridge } from './remotes.js'
 import { log } from './log.js'
 
@@ -315,8 +316,21 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
         if (pcm.length < a.sampleRate * 2 * 0.4) {
           return send(c, { type: 'transcript', sessionId: a.sessionId, text: '', seconds })
         }
-        const text = await stt.transcribe(pcm, a.sampleRate)
-        return send(c, { type: 'transcript', sessionId: a.sessionId, text, seconds })
+        const target = a.sessionId ? allSessions().find(s => s.id === a.sessionId) : undefined
+        const shell = target?.kind === 'shell'
+        const heard = await stt.transcribe(pcm, a.sampleRate, shell ? cfg.stt.shellPrompt : undefined)
+        let text = heard
+        if (shell && cfg.stt.shellTransform !== 'off' && heard) {
+          text = spokenToCommand(heard)
+          if (cfg.stt.shellTransform === 'claude') {
+            text = await refineWithClaude(heard, text).catch(err => {
+              log(`claude refine failed: ${(err as Error).message}`)
+              return text
+            })
+          }
+          log(`command: "${heard}" → "${text}"`)
+        }
+        return send(c, { type: 'transcript', sessionId: a.sessionId, text, raw: shell && text !== heard ? heard : undefined, seconds })
       }
     }
   }

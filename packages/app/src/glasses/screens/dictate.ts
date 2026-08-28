@@ -15,6 +15,8 @@ export class DictateScreen implements Screen {
   private startedAt = Date.now()
   private bytes = 0
   private text = ''
+  /** What whisper heard, when the bridge turned it into a shell command. */
+  private raw = ''
   private error = ''
   private cursor = 0
   private tick: number | null = null
@@ -32,6 +34,7 @@ export class DictateScreen implements Screen {
       this.ctx.fleet.on('transcript', t => {
         if (this.phase !== 'transcribing') return
         this.text = t.text.trim()
+        this.raw = (t.raw ?? '').trim()
         this.phase = this.text ? 'review' : 'failed'
         this.error = this.text ? '' : `nothing heard (${t.seconds.toFixed(1)}s)`
         this.cursor = 0
@@ -156,6 +159,18 @@ export class DictateScreen implements Screen {
         },
       },
       ...typeOnly,
+      ...(this.raw && this.raw !== this.text
+        ? [
+            {
+              label: 'Use what was heard instead',
+              run: () => {
+                this.text = this.raw
+                this.raw = ''
+                this.cursor = 0
+              },
+            },
+          ]
+        : []),
       { label: 'Retry', run: () => this.ctx.ui.replace(new DictateScreen(this.ctx, this.key, this.opts)) },
       { label: 'Cancel', run: () => this.ctx.ui.pop() },
     ]
@@ -180,11 +195,12 @@ export class DictateScreen implements Screen {
         return { header: fit(`${name}  transcribing`, LINE_W), body: 'Transcribing on the bridge...', footer: 'double-tap: cancel' }
       case 'review': {
         const items = this.reviewItems()
-        const textPages = paginate(this.text, LINE_W, BODY_LINES - items.length)
+        const heard = this.raw && this.raw !== this.text ? [fit(`heard: ${this.raw}`, LINE_W)] : []
+        const textPages = paginate(this.text, LINE_W, Math.max(1, BODY_LINES - items.length - heard.length))
         const rows = items.map((it, i) => `${i === this.cursor ? '>' : ' '} ${it.label}`)
         return {
-          header: fit(`${name}  review transcript`, LINE_W),
-          body: `${textPages[0]}\n${rows.join('\n')}`,
+          header: fit(`${name}  ${this.isShell() ? 'review command' : 'review transcript'}`, LINE_W),
+          body: `${[...heard, textPages[0]].join('\n')}\n${rows.join('\n')}`,
           footer: 'swipe: select   tap: run   double-tap: cancel',
         }
       }

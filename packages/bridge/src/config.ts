@@ -23,6 +23,14 @@ export interface BridgeConfig {
     language: string
     /** Initial prompt: biases whisper toward this vocabulary/style. */
     prompt: string
+    /** Whisper prompt used when dictating into a terminal row (shell vocabulary). */
+    shellPrompt: string
+    /**
+     * How terminal dictation becomes a command: `rules` (spoken symbols, gluing,
+     * common mis-hearings), `claude` (rules, then a pass through the local
+     * `claude -p` CLI), or `off` (raw transcript).
+     */
+    shellTransform: 'rules' | 'claude' | 'off'
   }
   /** How often (ms) to rescan tmux panes for Claude processes. */
   tmuxScanIntervalMs: number
@@ -57,6 +65,10 @@ function defaults(): BridgeConfig {
       prompt:
         'Instructions for Claude Code, a coding agent: refactor, run the tests, git commit, npm, TypeScript, tmux pane id, ' +
         'API, JSON, README, config file, bridge, WebSocket, hook, statusline, glasses, Even Hub, Tailscale.',
+      shellPrompt:
+        'Shell commands spoken aloud: ls dash la, cd tilde slash projects, git status, git commit dash m, npm run build, ' +
+        'ping google dot com, grep dash r pattern, cat file dot txt, pipe, star, dollar HOME, sudo, docker, kubectl, tmux.',
+      shellTransform: 'rules',
     },
     tmuxScanIntervalMs: 4000,
     terminals: true,

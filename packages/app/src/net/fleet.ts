@@ -24,7 +24,7 @@ export interface FleetEvents {
   sessions: FleetSession[]
   bridges: BridgeClient[]
   detail: FleetDetail
-  transcript: { key?: string; text: string; seconds: number }
+  transcript: { key?: string; text: string; raw?: string; seconds: number }
   ack: { bridgeId: string; of: string; ok: boolean; message?: string }
   log: string
 }
@@ -58,7 +58,7 @@ export class Fleet extends Emitter<FleetEvents> {
         const key = `${e.id}/${d.id}`
         if (key === this.subscribedKey) this.emit('detail', { ...d, key, bridgeId: e.id })
       })
-      c.on('transcript', t => this.emit('transcript', { key: t.sessionId ? `${e.id}/${t.sessionId}` : undefined, text: t.text, seconds: t.seconds }))
+      c.on('transcript', t => this.emit('transcript', { key: t.sessionId ? `${e.id}/${t.sessionId}` : undefined, text: t.text, raw: t.raw, seconds: t.seconds }))
       c.on('ack', a => this.emit('ack', { bridgeId: e.id, ...a }))
       c.on('error', m => this.emit('log', `${e.name}: ${m}`))
       this.clients.set(e.id, c)

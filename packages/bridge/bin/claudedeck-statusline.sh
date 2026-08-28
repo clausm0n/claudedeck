@@ -3,6 +3,8 @@
 # seconds; we forward it to the bridge (model, context %, session name) and print
 # a compact status line for the terminal.
 PORT="${CLAUDEDECK_PORT:-7788}"
+# Set by the bridge for its own helper `claude -p` calls — they are not sessions.
+[ -n "${CLAUDEDECK_SILENT:-}" ] && { [ -t 0 ] || cat >/dev/null; exit 0; }
 # Ancestor pids (nearest first) — the bridge picks the `claude` process among
 # them and uses it to notice when the session exits.
 ANC=""; P=$$; i=0

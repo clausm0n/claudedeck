@@ -109,7 +109,8 @@ export type ServerMessage =
   | { type: 'session'; session: SessionDetail }
   | { type: 'screen'; sessionId: string; lines: string[] }
   | { type: 'ack'; of: string; ok: boolean; message?: string }
-  | { type: 'transcript'; sessionId?: string; text: string; seconds: number }
+  /** `raw` = what was heard, when `text` was transformed into a shell command. */
+  | { type: 'transcript'; sessionId?: string; text: string; raw?: string; seconds: number }
   | { type: 'error'; message: string }
   | { type: 'pong' }
 

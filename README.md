@@ -71,6 +71,7 @@ Remote sessions appear in the same list tagged `@<machine>`; approvals, typed pr
 npm run app:dev            # Vite on :5173 with hot reload
 npm run app:qr -- --lan    # QR pointing at the dev server (+ bridge seeded); --ts for the Tailscale IP
 npm run app:sim            # evenhub-simulator with automation port 9898
+node packages/app/scripts/mock-bridge.mjs   # fake bridge with fabricated sessions (screenshots/demos); load the app with ?reset=1&bridge=ws://127.0.0.1:7799/ws?token=mock
 ```
 
 ### Packaging (installed app instead of dev sideload)
@@ -106,6 +107,16 @@ screen line`), after the Claude sessions. Open one to see its live screen; tap f
 transcript, then *Run in terminal* or *Type only*), Ctrl-C, Enter, Esc, full-screen view, and *Kill terminal* (two taps).
 The last rows of the list are `+ new terminal @<machine>` — one per bridge and per relayed machine — which opens a detached
 tmux session (`t1`, `t2`, …) in your home directory. Take it over from any terminal with `tmux attach -t t1`.
+
+**Dictating commands.** For terminal rows the bridge turns what whisper heard into a command line before it reaches the
+review screen: spoken symbols (`dash`, `dot`, `slash`, `pipe`, `tilde`, `star`, `dollar`, `quote`, `and and`, …) become
+symbols and glue to their neighbours (`ping google dot com dash c four` → `ping google.com -c 4`), spelled letters merge
+(`l s dash l a` → `ls -la`), number words become digits, `capital x` capitalises, and common mis-hearings of command names
+are fixed in command position (`get status` → `git status`, `pseudo` → `sudo`). The review screen shows `heard: …` above the
+command and offers *Use what was heard instead*. Whisper also gets a shell vocabulary prompt (`stt.shellPrompt`). Set
+`stt.shellTransform` in `~/.claudedeck/config.json` to `"claude"` for an extra pass through your local `claude -p`
+(slower, smarter; uses your subscription — its hooks are muted with `CLAUDEDECK_SILENT`), or `"off"` for the raw transcript.
+Claude Code sessions always get the raw transcript — Claude infers intent itself.
 
 Plain terminal tabs are invisible to the bridge until they are inside tmux: `deck` (from `scripts/claude-tmux.sh`) puts the
 current tab under tmux with the status bar off, so it behaves like before but is now visible and controllable from the

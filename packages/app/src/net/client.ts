@@ -15,7 +15,7 @@ export interface ClientEvents {
   state: ConnState
   sessions: SessionSummary[]
   detail: SessionDetail
-  transcript: { sessionId?: string; text: string; seconds: number }
+  transcript: { sessionId?: string; text: string; raw?: string; seconds: number }
   ack: { of: string; ok: boolean; message?: string }
   error: string
 }
@@ -186,7 +186,7 @@ export class BridgeClient extends Emitter<ClientEvents> {
         this.screenWaiters.splice(0).forEach(fn => fn(msg.lines))
         break
       case 'transcript':
-        this.emit('transcript', { sessionId: msg.sessionId, text: msg.text, seconds: msg.seconds })
+        this.emit('transcript', { sessionId: msg.sessionId, text: msg.text, raw: msg.raw, seconds: msg.seconds })
         break
       case 'ack':
         if (msg.of === 'terminal_new') this.terminalWaiters.splice(0).forEach(fn => fn({ ok: msg.ok, message: msg.message }))
