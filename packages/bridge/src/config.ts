@@ -31,6 +31,14 @@ export interface BridgeConfig {
      * `claude -p` CLI), or `off` (raw transcript).
      */
     shellTransform: 'rules' | 'claude' | 'off'
+    /**
+     * Model for the `claude` transform (`claude -p --model`). It runs as a
+     * read-only agent in the terminal's directory (ls/find/Glob only) so
+     * "change directory to Mandelglyph" becomes `cd Mandelglyph` even when
+     * whisper heard "mandel glif". `sonnet` resolves in 1-2 turns (~2 s of
+     * model time); `haiku` explores more and is slower in practice.
+     */
+    shellModel: string
   }
   /** How often (ms) to rescan tmux panes for Claude processes. */
   tmuxScanIntervalMs: number
@@ -79,6 +87,7 @@ function defaults(): BridgeConfig {
         'Shell commands spoken aloud: ls dash la, cd tilde slash projects, git status, git commit dash m, npm run build, ' +
         'ping google dot com, grep dash r pattern, cat file dot txt, pipe, star, dollar HOME, sudo, docker, kubectl, tmux.',
       shellTransform: 'rules',
+      shellModel: 'sonnet',
     },
     tmuxScanIntervalMs: 4000,
     terminals: true,

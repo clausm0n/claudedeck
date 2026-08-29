@@ -117,10 +117,17 @@ review screen: spoken symbols (`dash`, `dot`, `slash`, `pipe`, `tilde`, `star`, 
 symbols and glue to their neighbours (`ping google dot com dash c four` → `ping google.com -c 4`), spelled letters merge
 (`l s dash l a` → `ls -la`), number words become digits, `capital x` capitalises, and common mis-hearings of command names
 are fixed in command position (`get status` → `git status`, `pseudo` → `sudo`). The review screen shows `heard: …` above the
-command and offers *Use what was heard instead*. Whisper also gets a shell vocabulary prompt (`stt.shellPrompt`). Set
-`stt.shellTransform` in `~/.claudedeck/config.json` to `"claude"` for an extra pass through your local `claude -p`
-(slower, smarter; uses your subscription — its hooks are muted with `CLAUDEDECK_SILENT`), or `"off"` for the raw transcript.
-Claude Code sessions always get the raw transcript — Claude infers intent itself.
+command and offers *Use what was heard instead*. Whisper also gets a shell vocabulary prompt (`stt.shellPrompt`).
+
+Names that are hard to pronounce (`Mandelglyph`, `penrose_generator`) come out of whisper as "mandel glif" — rules cannot
+fix that. Set `stt.shellTransform` to `"claude"` in `~/.claudedeck/config.json` and the bridge that owns the terminal runs
+a small **read-only agent** (`claude -p`, model `stt.shellModel`, default `sonnet` — it resolves in 1–2 turns where haiku wanders) in the pane's directory: it gets the directory
+listing, may look deeper with `ls`/`find`/Glob only, and returns one runnable command — *"change directory to mandel glif"*
+→ `cd Mandelglyph`, *"list the python files in mandel glif source"* → `ls Mandelglyph/**/*.py`. For relayed terminals the
+hub forwards a `refine` request so the remote explores its own filesystem. Costs ~5 s and about a cent per
+command on your subscription; hooks are muted (`CLAUDEDECK_SILENT`), nothing is persisted, and any failure falls back to
+the rule-based draft. `"off"` sends the raw transcript. Claude Code sessions always get the raw transcript — Claude infers
+intent itself.
 
 Plain terminal tabs are invisible to the bridge until they are inside tmux: `deck` (from `scripts/claude-tmux.sh`) puts the
 current tab under tmux with the status bar off, so it behaves like before but is now visible and controllable from the

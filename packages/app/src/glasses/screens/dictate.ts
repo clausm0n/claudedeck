@@ -192,7 +192,11 @@ export class DictateScreen implements Screen {
         }
       }
       case 'transcribing':
-        return { header: fit(`${name}  transcribing`, LINE_W), body: 'Transcribing on the bridge...', footer: 'double-tap: cancel' }
+        return {
+          header: fit(`${name}  transcribing`, LINE_W),
+          body: this.isShell() ? "Transcribing on the bridge, then resolving the command against the terminal's directory..." : 'Transcribing on the bridge...',
+          footer: 'double-tap: cancel',
+        }
       case 'review': {
         const items = this.reviewItems()
         const heard = this.raw && this.raw !== this.text ? [fit(`heard: ${this.raw}`, LINE_W)] : []

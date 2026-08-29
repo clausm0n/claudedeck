@@ -6,6 +6,8 @@
  * rows; Claude Code sessions get the raw transcript.
  */
 import { execFile } from 'node:child_process'
+import fs from 'node:fs'
+import os from 'node:os'
 
 type Glue = 'both' | 'left' | 'right' | 'none' | 'pathish'
 interface Sym {
@@ -305,6 +307,121 @@ function isSpelled(prev: { text: string }, cur: { text: string }): boolean {
  * subscription, no API key). CLAUDEDECK_SILENT keeps its hooks from registering
  * a session with the bridge.
  */
+export interface ResolveOptions {
+  /** Directory of the terminal pane; the agent explores it read-only. */
+  cwd?: string
+  model?: string
+  timeoutMs?: number
+}
+
+const RESOLVE_SYSTEM =
+  'You turn ONE dictated request into ONE runnable shell command line for the current directory (zsh/bash). ' +
+  'The command starts with a program name (ls, cd, cat, grep, git, ...) — a bare path is never a valid answer. ' +
+  'Spoken names are phonetic approximations of real file and directory names: match them against the listing, ' +
+  'or check deeper with the read-only tools (ls, find, Glob) when needed. Prefer relative paths; quote names with spaces. ' +
+  'Never modify anything. Never ask questions and never explain: if the request is unclear or nothing matches, ' +
+  'return the rule-based draft unchanged. Do not explore for requests that name no file or directory.'
+
+const RESOLVE_SCHEMA = JSON.stringify({ type: 'object', properties: { command: { type: 'string' } }, required: ['command'] })
+
+/** Up to `max` entries of `dir`, directories marked with a trailing slash, dotfiles last. */
+export function listingOf(dir: string, max = 80): string[] {
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const names = entries.map(e => (e.isDirectory() ? `${e.name}/` : e.name)).sort((a, b) => {
+    const da = a.startsWith('.') ? 1 : 0
+    const db = b.startsWith('.') ? 1 : 0
+    return da - db || a.localeCompare(b)
+  })
+  return names.length > max ? [...names.slice(0, max), `… (${names.length - max} more)`] : names
+}
+
+/**
+ * Speech → command with a small read-only agent: `claude -p` (sonnet by default)
+ * running in the pane's directory, tools limited to ls/find/Glob, the
+ * directory listing pre-injected so most requests resolve in one turn
+ * ("change directory to mandel glif" → `cd Mandelglyph`). Rejects on any
+ * failure so the caller can fall back to the rule-based draft.
+ */
+export function resolveCommand(spoken: string, draft: string, opts: ResolveOptions = {}): Promise<string> {
+  const cwd = opts.cwd && fs.existsSync(opts.cwd) ? opts.cwd : os.homedir()
+  const listing = listingOf(cwd)
+  const prompt =
+    `Current directory: ${cwd}\n` +
+    `Entries: ${listing.join(' ') || '(empty)'}\n` +
+    `Spoken: "${spoken}"\n` +
+    `Rule-based draft: "${draft}"`
+  const args = [
+    '-p', prompt,
+    '--model', opts.model || 'sonnet',
+    '--system-prompt', RESOLVE_SYSTEM,
+    '--tools', 'Bash', 'Glob',
+    '--allowedTools', 'Bash(ls:*)', 'Bash(find:*)', 'Glob',
+    '--disallowedTools', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Agent', 'Bash(rm:*)', 'Bash(mv:*)',
+    '--max-turns', '4',
+    '--no-session-persistence',
+    '--output-format', 'json',
+    '--json-schema', RESOLVE_SCHEMA,
+  ]
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      'claude',
+      args,
+      // stdin must be closed: otherwise the CLI waits 3 s for piped input.
+      { cwd, timeout: opts.timeoutMs ?? 30_000, env: { ...process.env, CLAUDEDECK_SILENT: '1' }, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err) return reject(err)
+        const command = parseResolveOutput(stdout)
+        if (!command) return reject(new Error('no command in reply'))
+        resolve(sanitizeCommand(command, draft))
+      },
+    )
+    child.stdin?.end()
+  })
+}
+
+/** The CLI prints a warning line and then one JSON result object; take the structured field. */
+function parseResolveOutput(stdout: string): string | undefined {
+  for (const line of stdout.split('\n').reverse()) {
+    const t = line.trim()
+    if (!t.startsWith('{')) continue
+    try {
+      const d = JSON.parse(t) as { structured_output?: { command?: unknown }; result?: string; is_error?: boolean }
+      if (d.is_error) return undefined
+      const c = d.structured_output?.command
+      if (typeof c === 'string') return c
+      if (typeof d.result === 'string') {
+        try {
+          const inner = JSON.parse(d.result) as { command?: unknown }
+          if (typeof inner.command === 'string') return inner.command
+        } catch {
+          return d.result
+        }
+      }
+    } catch {
+      /* not the result line */
+    }
+  }
+  return undefined
+}
+
+/** One line, no fences/prompt, never a question; a bare path gets the draft's verb back. */
+function sanitizeCommand(raw: string, draft: string): string {
+  const line = raw.replace(/```[a-z]*/g, '').trim().split('\n').map(l => l.trim()).find(l => l) ?? ''
+  const cmd = line.replace(/^\$\s+/, '').replace(/\.$/, '')
+  if (!cmd || cmd.endsWith('?') || cmd.length > 300) return draft
+  const first = cmd.split(/\s+/)[0]
+  const verb = draft.split(/\s+/)[0]
+  // "Mandelglyph/src/main.py" for "list …" → "ls Mandelglyph/src/main.py"
+  if (/[\/.]/.test(first) && !first.startsWith('./') && !first.startsWith('/') && verb && /^[a-z][a-z0-9_-]*$/.test(verb) && verb !== first) return `${verb} ${cmd}`
+  return cmd
+}
+
+/** Blind refine (no filesystem access); kept for callers without a pane directory. */
 export function refineWithClaude(spoken: string, draft: string, model = 'haiku', timeoutMs = 25_000): Promise<string> {
   const prompt =
     'You turn dictated speech into ONE shell command line for a Unix terminal. ' +

@@ -91,6 +91,12 @@ export type ClientMessage =
   | { type: 'screen'; sessionId: string; lines?: number }
   /** Open a detached tmux session; the ack's `message` carries the new session id. `machine` targets a relayed bridge. */
   | { type: 'terminal_new'; machine?: string; cwd?: string }
+  /**
+   * Turn dictated speech into a shell command for a terminal row, using the
+   * bridge that owns the pane (it can look at the pane's directory). The
+   * ack's `message` carries the command. Sent hub→remote for relayed rows.
+   */
+  | { type: 'refine'; sessionId: string; heard: string; draft?: string }
   | { type: 'audio_start'; sessionId?: string; sampleRate?: number }
   | { type: 'audio_stop'; sessionId?: string }
   | { type: 'audio_cancel' }

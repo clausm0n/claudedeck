@@ -9,7 +9,7 @@ import type { BridgeConfig } from './config.js'
 import { SessionRegistry, type HookPayload, type StatuslinePayload } from './sessions.js'
 import { capturePane, lastTmuxError, listPanes, paneRunsClaude, sendKeys, sendText } from './tmux.js'
 import { createStt } from './stt.js'
-import { refineWithClaude, spokenToCommand } from './command.js'
+import { resolveCommand, spokenToCommand } from './command.js'
 import { RemoteBridge } from './remotes.js'
 import { VERSION } from './version.js'
 import { log } from './log.js'
@@ -42,6 +42,9 @@ const MIME: Record<string, string> = {
   '.map': 'application/json',
 }
 
+/** Budget for the read-only command-resolving agent (claude -p): startup + a couple of tool turns. */
+const REFINE_MS = 30_000
+
 /** Hook posts are small JSON blobs; anything bigger is not ours. */
 const MAX_BODY = 1024 * 1024
 
@@ -72,6 +75,27 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
     c.subscribed = undefined
     const r = old ? remoteFor(old) : undefined
     if (r && r !== keep && subscribersOf(r).length === 0) r.unsubscribe()
+  }
+
+  /**
+   * Dictated shell command → real command line, resolved by the bridge that
+   * owns the terminal (it explores the pane's directory read-only). Any
+   * failure falls back to the rule-based draft so dictation never stalls.
+   */
+  const refineFor = async (sessionId: string, heard: string, draft: string): Promise<string> => {
+    const r = remoteFor(sessionId)
+    if (r) {
+      const ack = await r.forwardRequest({ type: 'refine', sessionId, heard, draft }, 'refine', REFINE_MS + 5000)
+      if (ack.ok && ack.message) return ack.message
+      log(`refine on ${r.name} failed: ${ack.message ?? 'no reply'} — using the rule-based draft`)
+      return draft
+    }
+    try {
+      return await resolveCommand(heard, draft, { cwd: registry.get(sessionId)?.cwd, model: cfg.stt.shellModel, timeoutMs: REFINE_MS })
+    } catch (err) {
+      log(`refine failed: ${(err as Error).message} — using the rule-based draft`)
+      return draft
+    }
   }
 
   const server = http.createServer((req, res) => {
@@ -374,6 +398,20 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
         log(`terminal ${id} created`)
         return send(c, { type: 'ack', of: 'terminal_new', ok: true, message: id })
       }
+      case 'refine': {
+        // Resolve on the bridge that owns the pane: only it can look at the directory.
+        const r = remoteFor(msg.sessionId)
+        if (r) return send(c, await r.forwardRequest(msg, 'refine', REFINE_MS + 5000))
+        if (cfg.stt.shellTransform === 'off') return send(c, { type: 'ack', of: 'refine', ok: false, message: `shellTransform is off on ${cfg.machine}` })
+        const s = registry.get(msg.sessionId)
+        const draft = msg.draft || spokenToCommand(msg.heard)
+        try {
+          const text = await resolveCommand(msg.heard, draft, { cwd: s?.cwd, model: cfg.stt.shellModel, timeoutMs: REFINE_MS })
+          return send(c, { type: 'ack', of: 'refine', ok: true, message: text })
+        } catch (err) {
+          return send(c, { type: 'ack', of: 'refine', ok: false, message: `refine failed on ${cfg.machine}: ${(err as Error).message}` })
+        }
+      }
       case 'audio_start':
         // Dictation is always transcribed on the hub, even for remote sessions.
         c.audio = { chunks: [], sessionId: msg.sessionId, sampleRate: msg.sampleRate ?? 16000, startedAt: Date.now() }
@@ -395,14 +433,9 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
         const shell = target?.kind === 'shell'
         const heard = await stt.transcribe(pcm, a.sampleRate, shell ? cfg.stt.shellPrompt : undefined)
         let text = heard
-        if (shell && cfg.stt.shellTransform !== 'off' && heard) {
+        if (shell && target && cfg.stt.shellTransform !== 'off' && heard) {
           text = spokenToCommand(heard)
-          if (cfg.stt.shellTransform === 'claude') {
-            text = await refineWithClaude(heard, text).catch(err => {
-              log(`claude refine failed: ${(err as Error).message}`)
-              return text
-            })
-          }
+          if (cfg.stt.shellTransform === 'claude') text = await refineFor(target.id, heard, text)
           log(`command: "${heard}" → "${text}"`)
         }
         return send(c, { type: 'transcript', sessionId: a.sessionId, text, raw: shell && text !== heard ? heard : undefined, seconds })
