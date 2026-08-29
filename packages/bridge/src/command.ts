@@ -570,6 +570,7 @@ const LOCAL_SYSTEM =
   'or {"tool":"done","command":"<the command>"}. The command must start with a program name (cd, ls, cat, git, ...), be a single line, contain no explanation, and never modify anything unless the user asked for it. ' +
   'Only reference files and directories that appear in the listing, the likely matches or tool results — never invent a script or file name; keep the user\'s words for anything you cannot resolve. ' +
   'Words listed as installed programs are commands to run (with any spoken arguments), not files: "run claude code" → claude, "open vim on the readme" → vim README.md. ' +
+  '"<program> in <directory>" means change into that directory first: "claude in mandel glif" → cd Mandelglyph && claude. ' +
   'If the request names no file or directory, return the rule-based draft unchanged.'
 
 const TURN_SCHEMA = {
