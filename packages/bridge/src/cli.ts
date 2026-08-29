@@ -8,6 +8,7 @@ import { SessionRegistry } from './sessions.js'
 import { startServer } from './server.js'
 import { installHooks, uninstallHooks, HOOK_EVENTS } from './hooks-install.js'
 import { WHISPER_MODEL_URL, createStt } from './stt.js'
+import { LLM_MODELS, createLlm } from './llm.js'
 import { installService, restartService, uninstallService } from './launchd.js'
 import { formatReport, runDoctor } from './doctor.js'
 import { healthUrlFor, repoRoot, updateLocal, updateRemote } from './update.js'
@@ -31,6 +32,7 @@ const HELP = `claudedeck ${VERSION} — bridge between Claude Code sessions and 
   claudedeck pair [--open]         QR code the installed app scans (phone page → Scan QR); --open shows a crisp one in the browser
   claudedeck token [--rotate]      print (or rotate) the shared secret
   claudedeck setup-stt [model]     download a whisper.cpp model (default: base.en)
+  claudedeck setup-llm [model]     download a local open model for terminal dictation (default: qwen2.5-7b) and enable it
   claudedeck install-service       create/refresh the launchd agent (stable node path) and (re)start it (macOS)
   claudedeck uninstall-service     stop and remove the launchd agent
   claudedeck status                list sessions the bridge currently sees
@@ -243,37 +245,29 @@ async function main(): Promise<void> {
       const model = rest[0] ?? 'base.en'
       const file = `ggml-${model}.bin`
       const dest = path.join(MODELS_DIR, file)
-      fs.mkdirSync(MODELS_DIR, { recursive: true })
-      if (fs.existsSync(dest)) {
-        console.log(`already present: ${dest}`)
-      } else {
-        const url = WHISPER_MODEL_URL + file
-        console.log(`downloading ${url}`)
-        const res = await fetch(url)
-        if (!res.ok || !res.body) throw new Error(`download failed: ${res.status}`)
-        const total = Number(res.headers.get('content-length') ?? 0)
-        const tmp = dest + '.part'
-        const out = fs.createWriteStream(tmp)
-        let got = 0
-        let lastPct = -1
-        for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
-          out.write(chunk)
-          got += chunk.length
-          const pct = total ? Math.floor((got / total) * 100) : -1
-          if (pct !== lastPct && pct % 5 === 0) {
-            lastPct = pct
-            process.stdout.write(`\r  ${(got / 1e6).toFixed(0)} MB${total ? ` / ${(total / 1e6).toFixed(0)} MB (${pct}%)` : ''}   `)
-          }
-        }
-        await new Promise<void>((resolve, reject) => out.end((err?: Error | null) => (err ? reject(err) : resolve())))
-        fs.renameSync(tmp, dest)
-        console.log(`\nsaved ${dest} (${(got / 1e6).toFixed(0)} MB)`)
-      }
+      await downloadTo(WHISPER_MODEL_URL + file, dest)
       cfg.stt.backend = 'whisper-cpp'
       cfg.stt.model = dest
       saveConfig(cfg)
       const stt = createStt(cfg)
       console.log(`whisper available: ${await stt.available()} (binary: whisper-cli — brew install whisper-cpp)`)
+      return
+    }
+    case 'setup-llm': {
+      const key = rest.find(a => !a.startsWith('--')) ?? 'qwen2.5-7b'
+      const m = LLM_MODELS[key]
+      if (!m) throw new Error(`unknown model ${key}; choose one of: ${Object.keys(LLM_MODELS).join(', ')}`)
+      console.log(`${key}: ${m.size} — ${m.note}`)
+      const dest = path.join(MODELS_DIR, m.file)
+      await downloadTo(m.url, dest)
+      cfg.llm.backend = 'llama-cpp'
+      cfg.llm.model = dest
+      cfg.stt.shellTransform = 'local'
+      saveConfig(cfg)
+      const llm = createLlm(cfg)
+      const problem = await llm.problem()
+      console.log(problem ? `not usable yet: ${problem}` : `local model ready: ${llm.modelName} (stt.shellTransform = local)`)
+      console.log('Restart the bridge to apply: claudedeck restart')
       return
     }
     case 'install-service': {
@@ -338,6 +332,35 @@ function copyToClipboard(text: string): boolean {
     if (!r.error && r.status === 0) return true
   }
   return false
+}
+
+/** Stream a download to `dest` (skipped when present), showing progress. */
+async function downloadTo(url: string, dest: string): Promise<void> {
+  fs.mkdirSync(path.dirname(dest), { recursive: true })
+  if (fs.existsSync(dest)) {
+    console.log(`already present: ${dest}`)
+    return
+  }
+  console.log(`downloading ${url}`)
+  const res = await fetch(url)
+  if (!res.ok || !res.body) throw new Error(`download failed: ${res.status}`)
+  const total = Number(res.headers.get('content-length') ?? 0)
+  const tmp = dest + '.part'
+  const out = fs.createWriteStream(tmp)
+  let got = 0
+  let lastPct = -1
+  for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+    out.write(chunk)
+    got += chunk.length
+    const pct = total ? Math.floor((got / total) * 100) : -1
+    if (pct !== lastPct && pct % 5 === 0) {
+      lastPct = pct
+      process.stdout.write(`\r  ${(got / 1e6).toFixed(0)} MB${total ? ` / ${(total / 1e6).toFixed(0)} MB (${pct}%)` : ''}   `)
+    }
+  }
+  await new Promise<void>((resolve, reject) => out.end((err?: Error | null) => (err ? reject(err) : resolve())))
+  fs.renameSync(tmp, dest)
+  console.log(`\nsaved ${dest} (${(got / 1e6).toFixed(0)} MB)`)
 }
 
 main().catch(err => {

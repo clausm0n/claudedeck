@@ -10,6 +10,7 @@ import { HOOK_EVENTS, hookCommand, ourHookCommands, statuslineCommand } from './
 import { cliPath, plistPath, readPlist, serviceStatus } from './launchd.js'
 import { tailscaleInfo, tailscaleServe } from './netinfo.js'
 import { createStt } from './stt.js'
+import { createLlm } from './llm.js'
 import { repoRoot } from './update.js'
 import { MIN_REMOTE_VERSION, VERSION, compareVersions } from './version.js'
 import { PROTOCOL_VERSION } from '@claudedeck/shared'
@@ -62,6 +63,7 @@ export async function runDoctor(cfg: BridgeConfig): Promise<DoctorReport> {
   checks.push(...checkWrapper(root))
   add(await checkTmux(cfg, health))
   add(await checkStt(cfg))
+  add(await checkLlm(cfg))
 
   // ── network ──
   checks.push(...checkTailscale(cfg))
@@ -329,6 +331,21 @@ async function checkStt(cfg: BridgeConfig): Promise<Check> {
   } catch (err) {
     return { name: 'stt', status: 'warn', detail: `stt check failed: ${(err as Error).message}` }
   }
+}
+
+async function checkLlm(cfg: BridgeConfig): Promise<Check> {
+  const mode = cfg.stt.shellTransform
+  if (mode === 'claude') return { name: 'llm', status: 'warn', detail: `terminal dictation uses the cloud (claude -p, ${cfg.stt.shellModel})`, hint: 'claudedeck setup-llm   (local open model instead)' }
+  const llm = createLlm(cfg)
+  const problem = await llm.problem()
+  if (mode !== 'local') {
+    return problem
+      ? { name: 'llm', status: 'pass', detail: `terminal dictation: rule-based only (${mode})`, hint: 'claudedeck setup-llm   (resolves spoken file names against the real directory, fully local)' }
+      : { name: 'llm', status: 'warn', detail: `local model ${llm.modelName} is present but stt.shellTransform is '${mode}'`, hint: "set stt.shellTransform to 'local' in ~/.claudedeck/config.json, then claudedeck restart" }
+  }
+  return problem
+    ? { name: 'llm', status: 'fail', detail: `stt.shellTransform is 'local' but ${problem}`, hint: 'brew install llama.cpp && claudedeck setup-llm' }
+    : { name: 'llm', status: 'pass', detail: `${llm.modelName} via llama-server on :${cfg.llm.port} (started on demand, stops after ${cfg.llm.idleStopMinutes} idle min)` }
 }
 
 function checkTailscale(cfg: BridgeConfig): Check[] {

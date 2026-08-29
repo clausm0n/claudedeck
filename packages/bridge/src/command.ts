@@ -8,6 +8,9 @@
 import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
+import path from 'node:path'
+import type { LocalLlm } from './llm.js'
+import { log } from './log.js'
 
 type Glue = 'both' | 'left' | 'right' | 'none' | 'pathish'
 interface Sym {
@@ -419,6 +422,253 @@ function sanitizeCommand(raw: string, draft: string): string {
   // "Mandelglyph/src/main.py" for "list …" → "ls Mandelglyph/src/main.py"
   if (/[\/.]/.test(first) && !first.startsWith('./') && !first.startsWith('/') && verb && /^[a-z][a-z0-9_-]*$/.test(verb) && verb !== first) return `${verb} ${cmd}`
   return cmd
+}
+
+// ───────────────────────── local model (llama.cpp) ─────────────────────────
+
+/**
+ * Speech-friendly key for a name: lowercase, letters only, common English
+ * spelling variants folded (ph→f, y→i, ck→k, doubled letters collapsed) so
+ * "mandel glif" and "Mandelglyph" land close together.
+ */
+export function phoneticKey(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/ph/g, 'f')
+    .replace(/ck/g, 'k')
+    .replace(/gh/g, '')
+    .replace(/[^a-z0-9]/g, '')
+    .replace(/y/g, 'i')
+    .replace(/(.)\1+/g, '$1')
+}
+
+function editDistance(a: string, b: string): number {
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...new Array<number>(b.length).fill(0)])
+  for (let j = 1; j <= b.length; j++) dp[0][j] = j
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1))
+    }
+  }
+  return dp[a.length][b.length]
+}
+
+/** 0..1 similarity of two names after phonetic folding. */
+export function nameSimilarity(spoken: string, name: string): number {
+  const a = phoneticKey(spoken)
+  const b = phoneticKey(name)
+  if (!a || !b) return 0
+  if (a === b) return 1
+  if (b.startsWith(a) || a.startsWith(b)) return 0.9
+  return 1 - editDistance(a, b) / Math.max(a.length, b.length)
+}
+
+const STOP_WORDS = new Set(['the', 'a', 'an', 'to', 'in', 'into', 'of', 'my', 'this', 'that', 'and', 'then', 'please', 'go', 'change', 'directory', 'folder', 'file', 'files', 'list', 'show', 'open', 'run', 'cd', 'ls', 'cat', 'with', 'for', 'on', 'at', 'from', 'up', 'down', 'back', 'it', 'all', 'me'])
+
+/** Relative paths (dirs end with `/`) of everything under `root` up to `depth`, capped. */
+export function walkTree(root: string, depth = 2, max = 400): string[] {
+  const out: string[] = []
+  const visit = (dir: string, rel: string, d: number) => {
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      if (out.length >= max) return
+      if (e.name.startsWith('.') || e.name === 'node_modules') continue
+      const p = rel ? `${rel}/${e.name}` : e.name
+      if (e.isDirectory()) {
+        out.push(`${p}/`)
+        if (d < depth) visit(path.join(dir, e.name), p, d + 1)
+      } else out.push(p)
+    }
+  }
+  visit(root, '', 1)
+  return out
+}
+
+/**
+ * Which real names the spoken words probably refer to: every 1–3 word phrase
+ * of the utterance is compared with each name in the tree; strong matches are
+ * handed to the model so it rarely needs a tool call.
+ */
+export function fuzzyCandidates(spoken: string, paths: string[], limit = 6): Array<{ phrase: string; path: string; score: number }> {
+  const words = spoken.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w && !STOP_WORDS.has(w))
+  const phrases: string[] = []
+  for (let n = 3; n >= 1; n--) for (let i = 0; i + n <= words.length; i++) phrases.push(words.slice(i, i + n).join(' '))
+  const best = new Map<string, { phrase: string; path: string; score: number }>()
+  for (const p of paths) {
+    const base = path.basename(p.replace(/\/$/, ''))
+    for (const phrase of phrases) {
+      const score = nameSimilarity(phrase, base)
+      if (score < 0.6) continue
+      const cur = best.get(p)
+      if (!cur || score > cur.score) best.set(p, { phrase, path: p, score })
+    }
+  }
+  return [...best.values()].sort((a, b) => b.score - a.score || a.path.length - b.path.length).slice(0, limit)
+}
+
+export interface LocalResolveOptions {
+  cwd?: string
+  llm: LocalLlm
+  timeoutMs?: number
+  maxTurns?: number
+}
+
+const LOCAL_SYSTEM =
+  'You convert a spoken request into ONE runnable shell command line (zsh/bash) for the current directory. ' +
+  'Spoken names are phonetic approximations of real file and directory names: use the real names from the listing and the "likely matches"; use tools only when a name is still unknown. ' +
+  'Reply with JSON only. Either {"tool":"list","path":"<dir>"} to list a directory, {"tool":"find","pattern":"<name fragment>"} to search names under the current directory, ' +
+  'or {"tool":"done","command":"<the command>"}. The command must start with a program name (cd, ls, cat, git, ...), be a single line, contain no explanation, and never modify anything unless the user asked for it. ' +
+  'Only reference files and directories that appear in the listing, the likely matches or tool results — never invent a script or file name; keep the user\'s words for anything you cannot resolve. ' +
+  'If the request names no file or directory, return the rule-based draft unchanged.'
+
+const TURN_SCHEMA = {
+  type: 'object',
+  properties: {
+    tool: { type: 'string', enum: ['list', 'find', 'done'] },
+    path: { type: 'string' },
+    pattern: { type: 'string' },
+    command: { type: 'string' },
+  },
+  required: ['tool'],
+}
+
+/** Last turn: no more tools, the grammar only admits a command. */
+const FINAL_SCHEMA = {
+  type: 'object',
+  properties: { tool: { type: 'string', enum: ['done'] }, command: { type: 'string', minLength: 1 } },
+  required: ['tool', 'command'],
+}
+
+interface Turn {
+  tool: 'list' | 'find' | 'done'
+  path?: string
+  pattern?: string
+  command?: string
+}
+
+/**
+ * Speech → command with a local open-weight model (llama.cpp): the model gets
+ * the directory listing plus phonetic candidates and may call read-only
+ * `list` / `find` tools (executed here, in Node, confined to the pane's
+ * directory tree and the home directory) before answering. Rejects on any
+ * failure so the caller falls back to the rule-based draft.
+ */
+export async function resolveCommandLocal(spoken: string, draft: string, opts: LocalResolveOptions): Promise<string> {
+  const cwd = opts.cwd && fs.existsSync(opts.cwd) ? opts.cwd : os.homedir()
+  const deadline = Date.now() + (opts.timeoutMs ?? 30_000)
+  const tree = walkTree(cwd, 2)
+  const candidates = fuzzyCandidates(spoken, tree)
+  const listing = listingOf(cwd, 60)
+  const messages: import('./llm.js').ChatMessage[] = [
+    { role: 'system', content: LOCAL_SYSTEM },
+    {
+      role: 'user',
+      content:
+        `Current directory: ${cwd}\n` +
+        `Entries: ${listing.join(' ') || '(empty)'}\n` +
+        (candidates.length ? `Likely matches for spoken names: ${candidates.map(c => `"${c.phrase}" → ${c.path}`).join('; ')}\n` : '') +
+        `Spoken: "${spoken}"\n` +
+        `Rule-based draft: "${draft}"`,
+    },
+  ]
+  const maxTurns = opts.maxTurns ?? 4
+  const trace: string[] = []
+  for (let turn = 0; turn < maxTurns; turn++) {
+    const left = deadline - Date.now()
+    if (left <= 0) throw new Error('local model timeout')
+    const last = turn === maxTurns - 1
+    const reply = await opts.llm.chatJson<Turn>(messages, last ? FINAL_SCHEMA : TURN_SCHEMA, { maxTokens: 160, timeoutMs: left })
+    if (reply.tool === 'done' && !(reply.command ?? '').trim() && !last) {
+      // An empty answer: ask once more with the command-only grammar.
+      messages.push({ role: 'assistant', content: JSON.stringify(reply) })
+      messages.push({ role: 'user', content: 'Reply with {"tool":"done","command":"..."} now.' })
+      continue
+    }
+    if (reply.tool === 'done' || last) {
+      const cmd = reply.command ?? ''
+      if (!cmd.trim()) throw new Error(`model returned no command (${trace.join(' > ') || 'no tools'})`)
+      if (trace.length) log(`refine: ${trace.join(' > ')} → "${cmd}"`)
+      return sanitizeCommand(cmd, draft)
+    }
+    const result = runTool(reply, cwd)
+    trace.push(`${reply.tool} ${reply.path ?? reply.pattern ?? ''}`.trim())
+    messages.push({ role: 'assistant', content: JSON.stringify(reply) })
+    messages.push({ role: 'user', content: result })
+  }
+  throw new Error('no command after tool turns')
+}
+
+/** Read-only tools for the local agent; paths resolve inside cwd (or ~) and never escape. */
+function runTool(t: Turn, cwd: string): string {
+  if (t.tool === 'list') {
+    const target = safePath(cwd, t.path ?? '.')
+    if (!target) return `list: path not allowed: ${t.path}`
+    const entries = listingOf(target, 80)
+    return `list ${t.path ?? '.'}: ${entries.length ? entries.join(' ') : '(empty or missing)'}`
+  }
+  if (t.tool === 'find') {
+    const pattern = (t.pattern ?? '').trim()
+    if (!pattern) return 'find: empty pattern'
+    const hits = findPaths(pattern, walkTree(cwd, 4, 2000))
+    return `find "${pattern}": ${hits.length ? hits.join(' ') : 'no matches'}`
+  }
+  return 'unknown tool'
+}
+
+/** Spoken file-type words → extensions, so "python files" finds *.py. */
+const TYPE_WORDS: Record<string, string[]> = {
+  python: ['py'], py: ['py'], javascript: ['js', 'mjs', 'cjs'], js: ['js', 'mjs'], typescript: ['ts', 'tsx'], ts: ['ts', 'tsx'],
+  markdown: ['md'], md: ['md'], readme: ['md'], text: ['txt'], txt: ['txt'], shell: ['sh', 'zsh'], sh: ['sh'], json: ['json'],
+  yaml: ['yml', 'yaml'], yml: ['yml', 'yaml'], toml: ['toml'], html: ['html'], css: ['css'], csv: ['csv'], image: ['png', 'jpg', 'jpeg', 'gif', 'svg'],
+  images: ['png', 'jpg', 'jpeg', 'gif', 'svg'], pdf: ['pdf'], rust: ['rs'], go: ['go'], swift: ['swift'], c: ['c', 'h'], cpp: ['cpp', 'cc', 'hpp'], java: ['java'],
+}
+
+/**
+ * Paths matching a spoken pattern: every token (split on `/`, spaces, globs)
+ * must resemble some path component or name a file type of the entry.
+ */
+export function findPaths(pattern: string, tree: string[], limit = 15): string[] {
+  const tokens = pattern
+    .toLowerCase()
+    .split(/[\s/*.$^]+/)
+    .map(t => t.replace(/\\/g, ''))
+    .filter(t => t && !STOP_WORDS.has(t))
+  if (!tokens.length) return []
+  const scored: Array<{ p: string; s: number }> = []
+  for (const p of tree) {
+    const parts = p.replace(/\/$/, '').split('/')
+    const ext = path.extname(parts[parts.length - 1]).slice(1).toLowerCase()
+    let total = 0
+    let ok = true
+    for (const tok of tokens) {
+      const byType = TYPE_WORDS[tok]?.includes(ext) ? 1 : 0
+      const byName = Math.max(0, ...parts.map(c => nameSimilarity(tok, c)))
+      const best = Math.max(byType, byName)
+      if (best < 0.6) {
+        ok = false
+        break
+      }
+      total += best
+    }
+    if (ok) scored.push({ p, s: total / tokens.length })
+  }
+  return scored
+    .sort((a, b) => b.s - a.s || a.p.length - b.p.length)
+    .slice(0, limit)
+    .map(x => x.p)
+}
+
+function safePath(cwd: string, p: string): string | undefined {
+  const expanded = p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p
+  const abs = path.resolve(cwd, expanded)
+  const home = os.homedir()
+  if (abs === cwd || abs.startsWith(cwd + path.sep) || abs === home || abs.startsWith(home + path.sep)) return abs
+  return undefined
 }
 
 /** Blind refine (no filesystem access); kept for callers without a pane directory. */

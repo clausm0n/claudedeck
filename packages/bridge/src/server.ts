@@ -9,7 +9,8 @@ import type { BridgeConfig } from './config.js'
 import { SessionRegistry, type HookPayload, type StatuslinePayload } from './sessions.js'
 import { capturePane, lastTmuxError, listPanes, paneRunsClaude, sendKeys, sendText } from './tmux.js'
 import { createStt } from './stt.js'
-import { resolveCommand, spokenToCommand } from './command.js'
+import { resolveCommand, resolveCommandLocal, spokenToCommand } from './command.js'
+import { createLlm } from './llm.js'
 import { RemoteBridge } from './remotes.js'
 import { VERSION } from './version.js'
 import { log } from './log.js'
@@ -55,6 +56,7 @@ export function appDistDir(): string {
 
 export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.Server {
   const stt = createStt(cfg)
+  const llm = createLlm(cfg)
   const clients = new Set<Client>()
   const remotes = (cfg.remotes ?? []).map(r => new RemoteBridge(r.name, r.url))
   const appDist = appDistDir()
@@ -91,11 +93,17 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
       return draft
     }
     try {
-      return await resolveCommand(heard, draft, { cwd: registry.get(sessionId)?.cwd, model: cfg.stt.shellModel, timeoutMs: REFINE_MS })
+      return await resolveLocally(heard, draft, registry.get(sessionId)?.cwd)
     } catch (err) {
       log(`refine failed: ${(err as Error).message} — using the rule-based draft`)
       return draft
     }
+  }
+
+  /** The configured transform on this bridge: the local model, or the cloud `claude -p` agent (opt-in). */
+  const resolveLocally = (heard: string, draft: string, cwd?: string): Promise<string> => {
+    if (cfg.stt.shellTransform === 'claude') return resolveCommand(heard, draft, { cwd, model: cfg.stt.shellModel, timeoutMs: REFINE_MS })
+    return resolveCommandLocal(heard, draft, { cwd, llm, timeoutMs: REFINE_MS })
   }
 
   const server = http.createServer((req, res) => {
@@ -159,6 +167,7 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
             lastSeenAgo: r.lastSeenAt ? Math.round((Date.now() - r.lastSeenAt) / 1000) : undefined,
             error: r.lastError || undefined,
           })),
+          llm: { backend: cfg.llm.backend, model: llm.modelName, running: llm.running, transform: cfg.stt.shellTransform, problem: await llm.problem() },
           app: fs.existsSync(path.join(appDist, 'index.html')),
         }),
       )
@@ -402,11 +411,11 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
         // Resolve on the bridge that owns the pane: only it can look at the directory.
         const r = remoteFor(msg.sessionId)
         if (r) return send(c, await r.forwardRequest(msg, 'refine', REFINE_MS + 5000))
-        if (cfg.stt.shellTransform === 'off') return send(c, { type: 'ack', of: 'refine', ok: false, message: `shellTransform is off on ${cfg.machine}` })
+        if (cfg.stt.shellTransform === 'off' || cfg.stt.shellTransform === 'rules') return send(c, { type: 'ack', of: 'refine', ok: false, message: `shellTransform is '${cfg.stt.shellTransform}' on ${cfg.machine} (set it to 'local' and run claudedeck setup-llm there)` })
         const s = registry.get(msg.sessionId)
         const draft = msg.draft || spokenToCommand(msg.heard)
         try {
-          const text = await resolveCommand(msg.heard, draft, { cwd: s?.cwd, model: cfg.stt.shellModel, timeoutMs: REFINE_MS })
+          const text = await resolveLocally(msg.heard, draft, s?.cwd)
           return send(c, { type: 'ack', of: 'refine', ok: true, message: text })
         } catch (err) {
           return send(c, { type: 'ack', of: 'refine', ok: false, message: `refine failed on ${cfg.machine}: ${(err as Error).message}` })
@@ -435,7 +444,7 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
         let text = heard
         if (shell && target && cfg.stt.shellTransform !== 'off' && heard) {
           text = spokenToCommand(heard)
-          if (cfg.stt.shellTransform === 'claude') text = await refineFor(target.id, heard, text)
+          if (cfg.stt.shellTransform === 'local' || cfg.stt.shellTransform === 'claude') text = await refineFor(target.id, heard, text)
           log(`command: "${heard}" → "${text}"`)
         }
         return send(c, { type: 'transcript', sessionId: a.sessionId, text, raw: shell && text !== heard ? heard : undefined, seconds })
@@ -486,7 +495,10 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
     process.exit(1)
   })
   server.listen(cfg.port, cfg.host)
-  server.on('close', () => remotes.forEach(r => r.stop()))
+  server.on('close', () => {
+    remotes.forEach(r => r.stop())
+    llm.stop()
+  })
   return server
 }
 

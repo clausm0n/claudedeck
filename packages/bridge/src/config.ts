@@ -30,7 +30,7 @@ export interface BridgeConfig {
      * common mis-hearings), `claude` (rules, then a pass through the local
      * `claude -p` CLI), or `off` (raw transcript).
      */
-    shellTransform: 'rules' | 'claude' | 'off'
+    shellTransform: 'rules' | 'local' | 'claude' | 'off'
     /**
      * Model for the `claude` transform (`claude -p --model`). It runs as a
      * read-only agent in the terminal's directory (ls/find/Glob only) so
@@ -39,6 +39,23 @@ export interface BridgeConfig {
      * model time); `haiku` explores more and is slower in practice.
      */
     shellModel: string
+  }
+  /**
+   * Local open-weight model for `stt.shellTransform: 'local'` — a llama.cpp
+   * `llama-server` the bridge starts on demand with a GGUF from `claudedeck
+   * setup-llm`. Everything stays on this machine.
+   */
+  llm: {
+    backend: 'llama-cpp' | 'none'
+    /** Path to the GGUF file. */
+    model: string
+    /** Optional explicit llama-server path; otherwise Homebrew's / PATH. */
+    binary?: string
+    /** Loopback port for the managed server. */
+    port: number
+    contextSize: number
+    /** Stop the server after this many idle minutes (0 = keep running). */
+    idleStopMinutes: number
   }
   /** How often (ms) to rescan tmux panes for Claude processes. */
   tmuxScanIntervalMs: number
@@ -89,6 +106,13 @@ function defaults(): BridgeConfig {
       shellTransform: 'rules',
       shellModel: 'sonnet',
     },
+    llm: {
+      backend: 'llama-cpp',
+      model: path.join(MODELS_DIR, 'Qwen2.5-7B-Instruct-Q4_K_M.gguf'),
+      port: 11435,
+      contextSize: 4096,
+      idleStopMinutes: 15,
+    },
     tmuxScanIntervalMs: 4000,
     terminals: true,
     remotes: [],
@@ -128,7 +152,7 @@ export function loadConfig(): BridgeConfig {
 }
 
 function merge(base: BridgeConfig, raw: Partial<BridgeConfig>): BridgeConfig {
-  return { ...base, ...raw, stt: { ...base.stt, ...(raw.stt ?? {}) } }
+  return { ...base, ...raw, stt: { ...base.stt, ...(raw.stt ?? {}) }, llm: { ...base.llm, ...(raw.llm ?? {}) } }
 }
 
 /** Hooks or a launchd plist exist → this machine was set up before, so a fresh token is a loss, not a first run. */

@@ -26,7 +26,7 @@ terminal on your machine); ClaudeDeck only watches and pokes them.
 - Node ≥ 22, `tmux` (`brew install tmux`) — Claude Code must run **inside a tmux pane** for input injection (`approve`, `interrupt`, dictation). Sessions outside tmux are still listed read-only.
 - Tailscale on the machine(s) and on the phone (the phone's Even App must reach the bridge).
 - Even Hub tooling: `npm i -g @evenrealities/evenhub-cli @evenrealities/evenhub-simulator`.
-- Optional dictation: `brew install whisper-cpp` then `claudedeck setup-stt large-v3-turbo` (1.6 GB; ~1.5 s per 5 s of speech on an M-series Mac with Metal). `base.en`/`small.en` are smaller, less accurate options. `stt.prompt` in `~/.claudedeck/config.json` biases recognition toward dev vocabulary — edit it to add your project names.
+- Optional dictation: `brew install whisper-cpp` then `claudedeck setup-stt large-v3-turbo`; optional local command resolver for terminal dictation: `brew install llama.cpp` then `claudedeck setup-llm` (1.6 GB; ~1.5 s per 5 s of speech on an M-series Mac with Metal). `base.en`/`small.en` are smaller, less accurate options. `stt.prompt` in `~/.claudedeck/config.json` biases recognition toward dev vocabulary — edit it to add your project names.
 
 ## Quick start — "my whole terminal stack, from anywhere"
 
@@ -120,14 +120,16 @@ are fixed in command position (`get status` → `git status`, `pseudo` → `sudo
 command and offers *Use what was heard instead*. Whisper also gets a shell vocabulary prompt (`stt.shellPrompt`).
 
 Names that are hard to pronounce (`Mandelglyph`, `penrose_generator`) come out of whisper as "mandel glif" — rules cannot
-fix that. Set `stt.shellTransform` to `"claude"` in `~/.claudedeck/config.json` and the bridge that owns the terminal runs
-a small **read-only agent** (`claude -p`, model `stt.shellModel`, default `sonnet` — it resolves in 1–2 turns where haiku wanders) in the pane's directory: it gets the directory
-listing, may look deeper with `ls`/`find`/Glob only, and returns one runnable command — *"change directory to mandel glif"*
-→ `cd Mandelglyph`, *"list the python files in mandel glif source"* → `ls Mandelglyph/**/*.py`. For relayed terminals the
-hub forwards a `refine` request so the remote explores its own filesystem. Costs ~5 s and about a cent per
-command on your subscription; hooks are muted (`CLAUDEDECK_SILENT`), nothing is persisted, and any failure falls back to
-the rule-based draft. `"off"` sends the raw transcript. Claude Code sessions always get the raw transcript — Claude infers
-intent itself.
+fix that. `claudedeck setup-llm` downloads a small **open-weight model** (Qwen2.5-7B-Instruct, 4.7 GB GGUF; `qwen2.5-3b`
+and `qwen3-8b` are alternatives) and sets `stt.shellTransform` to `"local"`: the bridge that owns the terminal then runs
+it with llama.cpp (`brew install llama.cpp`; the bridge starts `llama-server` on demand and stops it after 15 idle
+minutes) as a tiny read-only agent in the pane's directory. It gets the directory listing plus phonetic candidates
+computed by the bridge ("mandel glif" → `Mandelglyph/`), may call `list`/`find` tools (executed by the bridge, confined
+to that directory tree and `~`), and answers with one runnable command through a JSON grammar — *"change directory to
+mandel glif"* → `cd Mandelglyph`. Nothing leaves the machine; a remote terminal is resolved on the remote (the hub forwards
+a `refine` request), and any failure falls back to the rule-based draft. `"claude"` (a `claude -p` agent, uses the cloud
+via your subscription) and `"off"` (raw transcript) remain available. Claude Code sessions always get the raw transcript —
+Claude infers intent itself.
 
 Plain terminal tabs are invisible to the bridge until they are inside tmux: `deck` (from `scripts/claude-tmux.sh`) puts the
 current tab under tmux with the status bar off, so it behaves like before but is now visible and controllable from the
@@ -171,7 +173,7 @@ The bridge listens on `0.0.0.0` but requires the token for anything except loopb
 
 ```
 claudedeck start | install-hooks [--no-statusline] | uninstall-hooks | info | token [--rotate] | qr [--lan]
-claudedeck setup-stt [large-v3-turbo|small.en|base.en|...] | install-service | uninstall-service | restart | status
+claudedeck setup-stt [large-v3-turbo|small.en|base.en|...] | setup-llm [qwen2.5-7b|qwen2.5-3b|qwen3-8b] | install-service | uninstall-service | restart | status
 claudedeck doctor [--json] | update | version
 claudedeck remote add <name> <ws-url> | rm <name> | ls | update <name> --ssh user@host [--path ~/claudedeck]
 ```
