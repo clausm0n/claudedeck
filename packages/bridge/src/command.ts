@@ -511,6 +511,51 @@ export function fuzzyCandidates(spoken: string, paths: string[], limit = 6): Arr
   return [...best.values()].sort((a, b) => b.score - a.score || a.path.length - b.path.length).slice(0, limit)
 }
 
+// Executables on PATH, so "run claude code" means the program, not CLAUDE.md.
+let execCache: { at: number; names: Set<string> } | null = null
+export function installedPrograms(): Set<string> {
+  if (execCache && Date.now() - execCache.at < 60_000) return execCache.names
+  const names = new Set<string>()
+  for (const dir of (process.env.PATH ?? '').split(':').filter(Boolean)) {
+    let entries: string[]
+    try {
+      entries = fs.readdirSync(dir)
+    } catch {
+      continue
+    }
+    for (const e of entries) names.add(e)
+  }
+  execCache = { at: Date.now(), names }
+  return names
+}
+
+/** Spoken words/phrases that name an installed program ("claude code" → claude, "pseudo" is not). */
+export function programsMentioned(spoken: string): string[] {
+  const names = installedPrograms()
+  const words = spoken.toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/).filter(Boolean)
+  const found = new Set<string>()
+  for (let i = 0; i < words.length; i++) {
+    for (const cand of [words[i], words.slice(i, i + 2).join(''), words.slice(i, i + 2).join('-')]) {
+      if (cand.length > 1 && names.has(cand) && !STOP_WORDS.has(cand)) found.add(cand)
+    }
+  }
+  return [...found]
+}
+
+/** "run claude", "launch the claude code app", "open vim" → the program itself, no model needed. */
+export function launchShortcut(spoken: string): string | undefined {
+  const m = spoken.toLowerCase().replace(/[.!?]+$/, '').match(/^(?:please\s+)?(?:run|launch|start|open|execute|fire up)\s+(?:the\s+)?(.+?)(?:\s+(?:app|cli|program|tool|application))?$/)
+  if (!m) return undefined
+  const words = m[1].split(/\s+/)
+  if (words.length > 3) return undefined
+  // The whole phrase must be the program ("claude code" → claude); anything
+  // more ("claude in source") is for the model to turn into cd + program.
+  const names = installedPrograms()
+  const cands = [words.join(''), words.join('-'), ...(words.length === 1 ? [words[0]] : []), ...(words.length === 2 && words[1] === 'code' ? [words[0]] : [])]
+  for (const cand of cands) if (names.has(cand)) return cand
+  return undefined
+}
+
 export interface LocalResolveOptions {
   cwd?: string
   llm: LocalLlm
@@ -524,6 +569,7 @@ const LOCAL_SYSTEM =
   'Reply with JSON only. Either {"tool":"list","path":"<dir>"} to list a directory, {"tool":"find","pattern":"<name fragment>"} to search names under the current directory, ' +
   'or {"tool":"done","command":"<the command>"}. The command must start with a program name (cd, ls, cat, git, ...), be a single line, contain no explanation, and never modify anything unless the user asked for it. ' +
   'Only reference files and directories that appear in the listing, the likely matches or tool results — never invent a script or file name; keep the user\'s words for anything you cannot resolve. ' +
+  'Words listed as installed programs are commands to run (with any spoken arguments), not files: "run claude code" → claude, "open vim on the readme" → vim README.md. ' +
   'If the request names no file or directory, return the rule-based draft unchanged.'
 
 const TURN_SCHEMA = {
@@ -560,9 +606,13 @@ interface Turn {
  */
 export async function resolveCommandLocal(spoken: string, draft: string, opts: LocalResolveOptions): Promise<string> {
   const cwd = opts.cwd && fs.existsSync(opts.cwd) ? opts.cwd : os.homedir()
+  const shortcut = launchShortcut(spoken)
+  if (shortcut) return shortcut
   const deadline = Date.now() + (opts.timeoutMs ?? 30_000)
   const tree = walkTree(cwd, 2)
-  const candidates = fuzzyCandidates(spoken, tree)
+  const programs = programsMentioned(spoken)
+  // A program name must not be "resolved" to a file that happens to share it (claude → CLAUDE.md).
+  const candidates = fuzzyCandidates(spoken, tree).filter(c => !programs.some(p => nameSimilarity(c.phrase, p) >= 0.9))
   const listing = listingOf(cwd, 60)
   const messages: import('./llm.js').ChatMessage[] = [
     { role: 'system', content: LOCAL_SYSTEM },
@@ -572,6 +622,7 @@ export async function resolveCommandLocal(spoken: string, draft: string, opts: L
         `Current directory: ${cwd}\n` +
         `Entries: ${listing.join(' ') || '(empty)'}\n` +
         (candidates.length ? `Likely matches for spoken names: ${candidates.map(c => `"${c.phrase}" → ${c.path}`).join('; ')}\n` : '') +
+        (programs.length ? `Installed programs mentioned: ${programs.join(', ')}\n` : '') +
         `Spoken: "${spoken}"\n` +
         `Rule-based draft: "${draft}"`,
     },
