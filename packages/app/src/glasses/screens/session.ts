@@ -17,6 +17,8 @@ export class SessionScreen implements Screen {
   private pages: string[] = ['']
   private page = 0
   private pagesFor = ''
+  /** Why no detail arrived (bridge error for this subscription). */
+  private error: string | null = null
   private unsub: Array<() => void> = []
 
   constructor(private ctx: ScreenContext, private key: string) {}
@@ -38,6 +40,11 @@ export class SessionScreen implements Screen {
         this.ctx.ui.redraw()
       }),
       this.ctx.fleet.on('sessions', () => this.ctx.ui.redraw()),
+      this.ctx.fleet.on('detailError', e => {
+        if (e.key !== this.key || this.detail) return
+        this.error = e.message
+        this.ctx.ui.redraw()
+      }),
     )
   }
 
@@ -83,13 +90,21 @@ export class SessionScreen implements Screen {
       parts.push(s.notice)
       parts.push('')
     }
-    const text = d?.lastAssistant?.trim() || (d ? '(no assistant text yet)' : 'loading...')
+    const text = d?.lastAssistant?.trim() || (d ? '(no assistant text yet)' : this.pendingText(s))
     parts.push(text)
     const joined = parts.join('\n')
     if (joined === this.pagesFor) return
     this.pagesFor = joined
     this.pages = paginate(joined, LINE_W, BODY_LINES)
     if (this.page >= this.pages.length) this.page = this.pages.length - 1
+  }
+
+  /** Body while no detail has arrived: loading, an error from the bridge, or a vanished session. */
+  private pendingText(s: FleetSession | undefined): string {
+    if (this.error) return `${this.error}\n(double-tap: back)`
+    if (!s && !this.ctx.fleet.anyOpen) return 'bridge offline\n(double-tap: back)'
+    if (!s) return 'session not found (ended, or its bridge is offline)\n(double-tap: back)'
+    return 'loading...'
   }
 
   onScroll(dir: 'up' | 'down'): void {

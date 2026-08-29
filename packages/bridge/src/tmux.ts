@@ -46,8 +46,15 @@ export async function hasTmux(): Promise<boolean> {
 /** Last error from tmux/ps, for /debug. */
 export let lastTmuxError = ''
 
-/** All panes across all tmux sessions. Empty when tmux is absent or no server runs. */
-export async function listPanes(): Promise<TmuxPane[]> {
+/** A tmux/ps failure that means "no information this scan" (as opposed to "no server running" = no panes). */
+export class TmuxScanError extends Error {}
+
+/**
+ * All panes across all tmux sessions. Empty when tmux is absent or no server
+ * runs; throws TmuxScanError on any other failure (spawn error, timeout) so a
+ * scan can tell "nothing there" from "could not look".
+ */
+export async function listPanesStrict(): Promise<TmuxPane[]> {
   if (!(await hasTmux())) {
     lastTmuxError = 'tmux binary not found'
     return []
@@ -64,8 +71,10 @@ export async function listPanes(): Promise<TmuxPane[]> {
     ])
     lastTmuxError = ''
   } catch (err) {
-    lastTmuxError = `list-panes: ${(err as Error).message}`
-    return [] // no server running
+    const msg = (err as Error).message
+    lastTmuxError = `list-panes: ${msg}`
+    if (/no server running|error connecting to .*tmux/.test(msg)) return []
+    throw new TmuxScanError(lastTmuxError)
   }
   return out
     .split('\n')
@@ -76,6 +85,15 @@ export async function listPanes(): Promise<TmuxPane[]> {
     })
 }
 
+/** Tolerant variant: any failure reads as "no panes". */
+export async function listPanes(): Promise<TmuxPane[]> {
+  try {
+    return await listPanesStrict()
+  } catch {
+    return []
+  }
+}
+
 interface Proc {
   pid: number
   ppid: number
@@ -84,15 +102,15 @@ interface Proc {
 
 let procCache: { at: number; procs: Proc[] } | null = null
 
-/** Snapshot of the process table (cached ~1.5s). */
-async function processTable(): Promise<Proc[]> {
-  if (procCache && Date.now() - procCache.at < 1500) return procCache.procs
+/** Snapshot of the process table (cached ~1.5s). Throws TmuxScanError when `ps` fails. */
+async function processTable(fresh = false): Promise<Proc[]> {
+  if (!fresh && procCache && Date.now() - procCache.at < 1500) return procCache.procs
   let stdout: string
   try {
     ;({ stdout } = await execFileP('ps', ['-A', '-o', 'pid=,ppid=,args='], { maxBuffer: 8 * 1024 * 1024 }))
   } catch (err) {
     lastTmuxError = `ps: ${(err as Error).message}`
-    throw err
+    throw new TmuxScanError(lastTmuxError)
   }
   const procs: Proc[] = []
   for (const line of stdout.split('\n')) {
@@ -188,16 +206,25 @@ export async function sendKeys(paneId: string, keys: string[]): Promise<void> {
   }
 }
 
-/** Among candidate pids (a hook's ancestor chain), the one that is the `claude` CLI. */
-export async function claudePidAmong(pids: number[]): Promise<number | undefined> {
+/**
+ * Among candidate pids (a hook's ancestor chain), the one that is the `claude`
+ * CLI. `fresh` bypasses the ps cache (a just-started process may be missing
+ * from a 1.5 s old snapshot).
+ */
+export async function claudePidAmong(pids: number[], fresh = false): Promise<number | undefined> {
   if (!pids.length) return undefined
-  const procs = await processTable()
+  const procs = await processTable(fresh)
   const byPid = new Map(procs.map(p => [p.pid, p]))
   for (const pid of pids) {
     const p = byPid.get(pid)
     if (p && CLAUDE_ARGS.test(p.args)) return pid
   }
   return undefined
+}
+
+/** True when the pid is currently a `claude` process (guards against pid reuse). */
+export async function pidIsClaude(pid: number): Promise<boolean> {
+  return (await claudePidAmong([pid])) === pid
 }
 
 export function pidAlive(pid: number): boolean {

@@ -3,7 +3,7 @@ import http from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WebSocketServer, WebSocket } from 'ws'
-import type { ClientMessage, ServerMessage, SessionAction, SessionSummary } from '@claudedeck/shared'
+import type { ClientMessage, RemoteInfo, ServerMessage, SessionAction, SessionSummary } from '@claudedeck/shared'
 import { PROTOCOL_VERSION } from '@claudedeck/shared'
 import type { BridgeConfig } from './config.js'
 import { SessionRegistry, type HookPayload, type StatuslinePayload } from './sessions.js'
@@ -11,9 +11,8 @@ import { capturePane, lastTmuxError, listPanes, paneRunsClaude, sendKeys, sendTe
 import { createStt } from './stt.js'
 import { refineWithClaude, spokenToCommand } from './command.js'
 import { RemoteBridge } from './remotes.js'
+import { VERSION } from './version.js'
 import { log } from './log.js'
-
-const VERSION = '0.3.0'
 
 interface Client {
   ws: WebSocket
@@ -43,6 +42,9 @@ const MIME: Record<string, string> = {
   '.map': 'application/json',
 }
 
+/** Hook posts are small JSON blobs; anything bigger is not ours. */
+const MAX_BODY = 1024 * 1024
+
 /** Built glasses app (packages/app/dist), served at /app/ so no dev server is needed. */
 export function appDistDir(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'app', 'dist')
@@ -56,8 +58,32 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
 
   const allSessions = (): SessionSummary[] => [...registry.list(), ...remotes.flatMap(r => r.sessions)]
   const remoteFor = (id: string) => remotes.find(r => r.owns(id))
+  const remotesInfo = (): RemoteInfo[] => remotes.map(r => r.info())
+  const subscribersOf = (r: RemoteBridge) => [...clients].filter(c => c.subscribed && r.owns(c.subscribed))
 
-  const server = http.createServer(async (req, res) => {
+  /**
+   * A client stops watching its session. The remote keeps streaming details for
+   * a subscription nobody reads unless told, so forward the unsubscribe when the
+   * last watcher of that remote leaves (unless it is only switching sessions
+   * on the same remote — the next subscribe replaces it).
+   */
+  const releaseSubscription = (c: Client, keep?: RemoteBridge) => {
+    const old = c.subscribed
+    c.subscribed = undefined
+    const r = old ? remoteFor(old) : undefined
+    if (r && r !== keep && subscribersOf(r).length === 0) r.unsubscribe()
+  }
+
+  const server = http.createServer((req, res) => {
+    // An aborted hook POST or a thrown handler must never take the daemon down.
+    handleHttp(req, res).catch(err => {
+      log(`http ${req.method} ${req.url}: ${(err as Error).message}`)
+      if (!res.headersSent) res.writeHead(500)
+      res.end()
+    })
+  })
+
+  async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost')
     res.setHeader('Access-Control-Allow-Origin', '*')
     res.setHeader('Access-Control-Allow-Headers', '*')
@@ -94,8 +120,21 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
           ok: true,
           machine: cfg.machine,
           version: VERSION,
+          protocol: PROTOCOL_VERSION,
           sessions: allSessions().length,
-          remotes: remotes.map(r => ({ name: r.name, state: r.state, sessions: r.sessions.length, error: r.lastError || undefined })),
+          remotes: remotes.map(r => ({
+            name: r.name,
+            machine: r.host || undefined,
+            state: r.state,
+            version: r.version,
+            protocol: r.protocol,
+            tmux: r.tmux,
+            outdated: r.outdated,
+            canTerminal: r.canTerminal,
+            sessions: r.sessions.length,
+            lastSeenAgo: r.lastSeenAt ? Math.round((Date.now() - r.lastSeenAt) / 1000) : undefined,
+            error: r.lastError || undefined,
+          })),
           app: fs.existsSync(path.join(appDist, 'index.html')),
         }),
       )
@@ -114,7 +153,24 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
           paneError = (err as Error).message
         }
       }
-      res.end(JSON.stringify({ path: process.env.PATH, tmux: registry.tmuxAvailable, tmuxError: lastTmuxError, paneError, panes: panes.map(p => `${p.id} pid=${p.pid} cmd=${p.command}`), claudePanes, sessions: registry.dump() }, null, 2))
+      res.end(
+        JSON.stringify(
+          {
+            version: VERSION,
+            path: process.env.PATH,
+            tmux: registry.tmuxAvailable,
+            tmuxError: lastTmuxError,
+            paneError,
+            panes: panes.map(p => `${p.id} pid=${p.pid} cmd=${p.command}`),
+            claudePanes,
+            clients: [...clients].map(c => ({ subscribed: c.subscribed, alive: c.alive })),
+            remotes: remotesInfo(),
+            sessions: registry.dump(),
+          },
+          null,
+          2,
+        ),
+      )
       return
     }
     if (url.pathname === '/sessions') {
@@ -144,7 +200,7 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
       return
     }
     res.writeHead(404).end('claudedeck bridge')
-  })
+  }
 
   const wss = new WebSocketServer({ noServer: true })
 
@@ -164,7 +220,7 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
   }
 
   const broadcastSessions = () => {
-    const msg: ServerMessage = { type: 'sessions', sessions: allSessions() }
+    const msg: ServerMessage = { type: 'sessions', sessions: allSessions(), remotes: remotesInfo() }
     for (const c of clients) send(c, msg)
   }
 
@@ -183,30 +239,28 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
     r.on('detail', d => {
       for (const c of clients) if (c.subscribed === d.id) send(c, { type: 'session', session: d })
     })
-    r.on('ack', a => {
-      for (const c of clients) send(c, a)
+    // Acks are answered per request now (RemoteBridge.request); only strays land here.
+    r.on('ack', (a: { of: string; ok: boolean; message?: string }) => log(`remote ${r.name}: unmatched ack ${a.of} ok=${a.ok}${a.message ? ` (${a.message})` : ''}`))
+    r.on('error', (m: string, handled: boolean) => {
+      log(`remote ${r.name}: ${m}`)
+      // Not consumed by a pending request/screen → it answers a subscribe
+      // (e.g. "no such session"); tell whoever is watching that remote.
+      if (!handled) for (const c of subscribersOf(r)) send(c, { type: 'error', message: `${r.name}: ${m}` })
     })
-    r.on('error', m => log(`remote ${r.name}: ${m}`))
     r.start()
   }
 
-  wss.on('connection', async (ws, req) => {
+  wss.on('connection', (ws, req) => {
     const client: Client = { ws, alive: true }
     clients.add(client)
-    log(`ws connect from ${req.socket.remoteAddress} (${clients.size} clients)`)
-    send(client, {
-      type: 'hello',
-      machine: cfg.machine,
-      version: VERSION,
-      protocol: PROTOCOL_VERSION,
-      stt: { available: await stt.available(), backend: stt.name },
-      tmux: registry.tmuxAvailable,
-    })
-    send(client, { type: 'sessions', sessions: allSessions() })
-
+    // Register every handler before the first await: an unhandled 'error'
+    // event exits the process, and a subscribe sent right after the client's
+    // hello would otherwise be dropped.
+    ws.on('error', err => log(`ws error from ${req.socket.remoteAddress}: ${err.message}`))
     ws.on('pong', () => (client.alive = true))
     ws.on('close', () => {
       clients.delete(client)
+      releaseSubscription(client)
       log(`ws close (${clients.size} clients)`)
     })
     ws.on('message', async (data, isBinary) => {
@@ -226,6 +280,22 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
         send(client, { type: 'error', message: (err as Error).message })
       }
     })
+    log(`ws connect from ${req.socket.remoteAddress} (${clients.size} clients)`)
+    stt
+      .available()
+      .catch(() => false)
+      .then(available => {
+        send(client, {
+          type: 'hello',
+          machine: cfg.machine,
+          version: VERSION,
+          protocol: PROTOCOL_VERSION,
+          stt: { available, backend: stt.name },
+          tmux: registry.tmuxAvailable,
+          remotes: remotesInfo(),
+        })
+        send(client, { type: 'sessions', sessions: allSessions(), remotes: remotesInfo() })
+      })
   })
 
   async function handle(c: Client, msg: ClientMessage): Promise<void> {
@@ -235,10 +305,11 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
       case 'ping':
         return send(c, { type: 'pong' })
       case 'subscribe': {
-        c.subscribed = msg.sessionId
         const r = remoteFor(msg.sessionId)
+        if (c.subscribed !== msg.sessionId) releaseSubscription(c, r)
+        c.subscribed = msg.sessionId
         if (r) {
-          if (!r.forward(msg)) send(c, { type: 'error', message: `remote ${r.name} not connected` })
+          if (!r.forward(msg)) send(c, { type: 'error', message: `${r.name} is not connected` })
           return
         }
         const d = registry.detail(msg.sessionId)
@@ -247,11 +318,12 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
         return
       }
       case 'unsubscribe':
-        c.subscribed = undefined
+        releaseSubscription(c)
         return
       case 'screen': {
         const r = remoteFor(msg.sessionId)
         if (r) {
+          // Rejections carry the remote's reason (or a 5 s timeout) and reach the client as an error.
           const lines = await r.screen(msg.sessionId, Math.min(200, msg.lines ?? 60))
           return send(c, { type: 'screen', sessionId: msg.sessionId, lines })
         }
@@ -263,8 +335,9 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
       case 'action': {
         const r = remoteFor(msg.sessionId)
         if (r) {
-          if (!r.forward(msg)) send(c, { type: 'ack', of: msg.action, ok: false, message: `remote ${r.name} not connected` })
-          return
+          // 0.2.0 remotes have no key mapping for these: they would throw, not ack.
+          if (r.outdated && (msg.action === 'kill' || msg.action === 'ctrl_c')) return send(c, { type: 'ack', of: msg.action, ok: false, message: r.outdatedMessage() })
+          return send(c, await r.forwardRequest(msg, msg.action))
         }
         const s = registry.get(msg.sessionId)
         if (!s?.pane) return send(c, { type: 'ack', of: msg.action, ok: false, message: 'no tmux pane for this session' })
@@ -277,10 +350,7 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
       }
       case 'send': {
         const r = remoteFor(msg.sessionId)
-        if (r) {
-          if (!r.forward(msg)) send(c, { type: 'ack', of: 'send', ok: false, message: `remote ${r.name} not connected` })
-          return
-        }
+        if (r) return send(c, await r.forwardRequest(msg, 'send'))
         const s = registry.get(msg.sessionId)
         if (!s?.pane) return send(c, { type: 'ack', of: 'send', ok: false, message: 'no tmux pane for this session' })
         log(`send "${msg.text.slice(0, 60)}" → ${s.name}`)
@@ -289,10 +359,15 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
       }
       case 'terminal_new': {
         if (msg.machine && msg.machine !== cfg.machine) {
+          const nack = (message: string) => send(c, { type: 'ack', of: 'terminal_new', ok: false, message })
           const r = remotes.find(x => x.machine === msg.machine || x.name === msg.machine)
-          if (!r) return send(c, { type: 'ack', of: 'terminal_new', ok: false, message: `no bridge named ${msg.machine}` })
-          if (!r.send({ type: 'terminal_new', cwd: msg.cwd })) send(c, { type: 'ack', of: 'terminal_new', ok: false, message: `remote ${r.name} not connected` })
-          return // the remote's ack (with a namespaced id) is relayed to every client
+          if (!r) return nack(`no bridge named ${msg.machine}`)
+          if (r.state !== 'open') return nack(`${r.name} is not connected${r.lastError ? ` (${r.lastError})` : ''}`)
+          // Answer the common failure instantly and actionably instead of after the app's 10 s timeout.
+          if (r.outdated) return nack(r.outdatedMessage())
+          if (r.tmux === false) return nack(`tmux not available on ${r.name}`)
+          // The remote creates the session and rescans before acking; 8 s stays under the app's 10 s.
+          return send(c, await r.request({ type: 'terminal_new', cwd: msg.cwd }, 'terminal_new', 8000))
         }
         if (!registry.tmuxAvailable) return send(c, { type: 'ack', of: 'terminal_new', ok: false, message: 'tmux not available on this bridge' })
         const id = await registry.createTerminal(msg.cwd)
@@ -332,6 +407,12 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
         }
         return send(c, { type: 'transcript', sessionId: a.sessionId, text, raw: shell && text !== heard ? heard : undefined, seconds })
       }
+      default: {
+        // A message this build does not know (newer app or hub). Silence here
+        // is what made "+ new terminal" hang against a 0.2.0 remote — always answer.
+        const type = (msg as { type?: string }).type ?? '?'
+        return send(c, { type: 'ack', of: type, ok: false, message: `unsupported message '${type}' on ${cfg.machine} (claudedeck ${VERSION}) - update this bridge` })
+      }
     }
   }
 
@@ -344,6 +425,7 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
       if (!c.alive) {
         c.ws.terminate()
         clients.delete(c)
+        releaseSubscription(c)
         continue
       }
       c.alive = false
@@ -351,13 +433,39 @@ export function startServer(cfg: BridgeConfig, registry: SessionRegistry): http.
     }
   }, 20_000).unref()
 
-  server.listen(cfg.port, cfg.host, () => {
+  server.on('listening', () => {
     log(`claudedeck bridge ${VERSION} listening on ${cfg.host}:${cfg.port} as "${cfg.machine}"`)
     if (remotes.length) log(`relaying remotes: ${remotes.map(r => r.name).join(', ')}`)
     log(fs.existsSync(path.join(appDist, 'index.html')) ? `serving glasses app at /app/ from ${appDist}` : 'glasses app not built (npm run build) — /app/ disabled')
   })
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      // Uncaught this would exit 1 and launchd would respawn us every 10 s
+      // with nothing in bridge.log. Wait for the other instance to go away.
+      log(`port ${cfg.port} is busy - retrying in 3 s`)
+      void whoHoldsPort(cfg.port).then(who => {
+        if (who) log(`another bridge already serves port ${cfg.port}: ${who} (stop it, or run this one with a different port)`)
+      })
+      setTimeout(() => server.listen(cfg.port, cfg.host), 3000)
+      return
+    }
+    log(`server error: ${err.message}`)
+    process.exit(1)
+  })
+  server.listen(cfg.port, cfg.host)
   server.on('close', () => remotes.forEach(r => r.stop()))
   return server
+}
+
+async function whoHoldsPort(port: number): Promise<string | undefined> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1500) })
+    if (!res.ok) return undefined
+    const h = (await res.json()) as { machine?: string; version?: string }
+    return h.machine ? `${h.machine} claudedeck ${h.version ?? '?'}` : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function isLoopback(addr?: string): boolean {
@@ -379,11 +487,23 @@ function header(req: http.IncomingMessage, name: string): string | undefined {
   return s && s.trim() ? s.trim() : undefined
 }
 
+/** Body as text; an aborted or oversized request yields '' instead of a rejection (never crash on a `curl -m` cut short). */
 function readBody(req: http.IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
+  return new Promise(resolve => {
     const chunks: Buffer[] = []
-    req.on('data', c => chunks.push(c))
+    let size = 0
+    req.on('data', (c: Buffer) => {
+      size += c.length
+      if (size > MAX_BODY) {
+        chunks.length = 0
+        req.destroy()
+        return
+      }
+      chunks.push(c)
+    })
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
-    req.on('error', reject)
+    req.on('error', () => resolve(''))
+    req.on('aborted', () => resolve(''))
+    req.on('close', () => resolve(''))
   })
 }

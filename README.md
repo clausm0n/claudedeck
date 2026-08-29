@@ -40,7 +40,7 @@ $CLI install-service      # launchd agent: bridge runs at login and restarts if 
 launchctl load -w ~/Library/LaunchAgents/com.claudedeck.bridge.plist
 $CLI setup-stt large-v3-turbo   # optional dictation (brew install whisper-cpp first)
 
-source scripts/claude-tmux.sh   # add to ~/.zshrc: every `claude` now runs in its own tmux pane (dies with its tab; CLAUDEDECK_PERSIST=1 keeps it)
+source scripts/claude-tmux.sh   # add to ~/.zshrc: every `claude` now runs in its own tmux pane (dies with its tab locally; kept over SSH — see below)
 $CLI qr                   # QR → scan in the Even App (Even Hub tab → developer section → Scan QR)
 ```
 
@@ -64,6 +64,8 @@ launchctl kickstart -k gui/$(id -u)/com.claudedeck.bridge                       
 Remote sessions appear in the same list tagged `@<machine>`; approvals, typed prompts, raw screen and dictation (transcribed on the hub) are forwarded. If the hub can only reach the remote via SSH, tunnel it: `ssh -N -L 7789:127.0.0.1:7788 user@remote` and add the remote as `ws://127.0.0.1:7789/ws?token=…`.
 
 `claudedeck remote ls | rm <name>` manage the list (`~/.claudedeck/config.json` → `remotes`).
+
+**Sessions over SSH persist.** The wrapper keeps a Claude session alive when the shell it was started from is an SSH login (`SSH_CONNECTION` set), so a dropped connection or a laptop sleep does not kill a running task. Plain `claude` in that directory re-attaches to the detached session (`CLAUDEDECK_NEW=1 claude` for a fresh one), `claude-sessions` lists them, `tmux kill-session -t =<name>` ends one. Local tabs keep the old behaviour (session dies with the tab); `CLAUDEDECK_PERSIST=1|0` overrides either way. Note: shells that were already open when the wrapper was installed do not have it — run `exec zsh` (or open a new tab) before launching `claude`, otherwise that session is read-only on the glasses.
 
 ### Dev loop
 

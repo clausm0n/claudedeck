@@ -4,8 +4,9 @@ import os from 'node:os'
 import path from 'node:path'
 import type { SessionDetail, SessionKind, SessionStatus, SessionSummary, ToolRef } from '@claudedeck/shared'
 import type { BridgeConfig } from './config.js'
-import { capturePane, claudePidAmong, isShellCommand, killPane, listPanes, listSessionNames, newSession, paneRunsClaude, pidAlive, type TmuxPane } from './tmux.js'
+import { capturePane, claudePidAmong, hasTmux, isShellCommand, killPane, listPanesStrict, listSessionNames, newSession, paneRunsClaude, pidAlive, pidIsClaude, TmuxScanError, type TmuxPane } from './tmux.js'
 import { findTranscriptForCwd, parseTranscript, summarizeToolInput, type TranscriptInfo } from './transcript.js'
+import { isInteractiveCli, paneFromTmuxRef, readSessionFiles, sessionFilesDir, transcriptPathFor, type ClaudeSessionFile } from './session-files.js'
 import { log } from './log.js'
 
 export interface HookPayload {
@@ -50,14 +51,26 @@ interface Session extends SessionDetail {
   endedAt?: number
   /** Last few pane rows, used for permission heuristics. */
   screenTail?: string[]
-  /** The claude CLI process, when a hook/statusline told us its ancestry. */
+  /** The claude CLI process, when a hook/statusline/session file told us. */
   pid?: number
-  /** Last time a hook or statusline post arrived for this session. */
+  /** Last time a hook, statusline post or session file confirmed this session alive. */
   lastSeen?: number
   /** Last time an actual hook event (not statusline) arrived — hooks are authoritative. */
   lastHookAt?: number
   /** Consecutive scans in which the pane no longer runs claude. */
   paneMisses?: number
+  /** The scanner dropped this session's pane (short ended-TTL applies). */
+  paneLost?: boolean
+  /**
+   * Whether the last hook/statusline post carried a tmux pane header.
+   * `false` = the process genuinely runs outside tmux (read-only for good).
+   */
+  inTmux?: boolean
+  /** Status from ~/.claude/sessions/<pid>.json, and when it was written / last seen. */
+  fileStatus?: ClaudeSessionFile['status']
+  fileStatusAt?: number
+  fileSeenAt?: number
+  lastDropLogAt?: number
   kind?: SessionKind
   command?: string
   /** Last rendered terminal text (terminal rows) — change detection for broadcasts. */
@@ -71,17 +84,32 @@ const ENDED_TTL_MS = 3 * 60 * 1000
 const SILENT_MS = 3 * 60 * 1000
 /** Transcript touched more recently than this → a turn is probably in progress. */
 const TRANSCRIPT_ACTIVE_MS = 25 * 1000
+/** A hook event this recent outranks anything the screen or the session file says. */
+const HOOK_FRESH_MS = 15 * 1000
+/** A session file read this recently is current (files are re-read every scan). */
+const FILE_FRESH_MS = 10 * 1000
 
-const PERMISSION_RX = /(Do you want to (proceed|make this edit|run|allow|create|delete|continue)|Allow .* to |Yes, and don't ask again|❯ 1\. Yes|\(esc\)\s*$|Waiting for your (approval|answer)|Would you like to)/im
-// Only the spinner line is a reliable "turn in progress" marker; tool
-// output glyphs like ⏺ stay on screen long after the turn ends.
-const WORKING_RX = /esc to interrupt/i
+// Dialog structure only: option list, the "don't ask again" row or the
+// dialog's own question. Prose such as "Would you like to…" or "allow users
+// to…" in an assistant answer must not read as a permission prompt.
+const PERMISSION_RX = /(❯\s*1\.\s|Yes, and don't ask again|Do you want to (proceed|make this edit|run|allow|create|delete)\?|Waiting for your (approval|answer)|\(esc\)\s*$)/m
+// Claude Code 2.1.x shows a spinner row like "✶ Proofing… (3m 35s · ↓ 15.5k tokens)"
+// or "✻ Waiting for 1 dynamic workflow to finish" while a turn runs; the
+// finished row reads "✻ Brewed for 3m 28s · done 8:20 PM" (no ellipsis).
+// "esc to interrupt" survives only in the API-retry banner.
+const WORKING_RX = /esc to interrupt|^[ \t]*[·✢✳✶✻✽][ \t]+.*(…|\.\.\.|Waiting for)/mu
 
 export class SessionRegistry extends EventEmitter {
   private sessions = new Map<string, Session>()
   private scanTimer?: NodeJS.Timeout
   private changed = new Set<string>()
   private flushTimer?: NodeJS.Timeout
+  private inflight?: Promise<void>
+  private queued = false
+  private fileWatcher?: fs.FSWatcher
+  private fileWatchTimer?: NodeJS.Timeout
+  private lastScanErrorAt = 0
+  private lastNoInfoLogAt = 0
   tmuxAvailable = false
 
   constructor(private cfg: BridgeConfig) {
@@ -91,10 +119,13 @@ export class SessionRegistry extends EventEmitter {
   start(): void {
     void this.scanTmux()
     this.scanTimer = setInterval(() => void this.scanTmux(), this.cfg.tmuxScanIntervalMs)
+    this.watchSessionFiles()
   }
 
   stop(): void {
     if (this.scanTimer) clearInterval(this.scanTimer)
+    if (this.fileWatchTimer) clearTimeout(this.fileWatchTimer)
+    this.fileWatcher?.close()
   }
 
   /** Rescan immediately (after creating/killing a pane) so the next broadcast is current. */
@@ -133,10 +164,12 @@ export class SessionRegistry extends EventEmitter {
   /** Raw internal state for /debug (loopback only). */
   dump(): Record<string, unknown>[] {
     return [...this.sessions.values()].map(s => ({
-      id: s.id, name: s.name, status: s.status, source: s.source, kind: s.kind, pane: s.pane, pid: s.pid,
+      id: s.id, name: s.name, status: s.status, source: s.source, kind: s.kind, pane: s.pane, pid: s.pid, inTmux: s.inTmux,
       lastSeenAgo: s.lastSeen ? Math.round((Date.now() - s.lastSeen) / 1000) : null,
       lastHookAgo: s.lastHookAt ? Math.round((Date.now() - s.lastHookAt) / 1000) : null,
-      paneMisses: s.paneMisses, endedAt: s.endedAt, transcript: s.transcriptPath?.split('/').pop(),
+      paneMisses: s.paneMisses, paneLost: s.paneLost, endedAt: s.endedAt,
+      fileStatus: s.fileStatus, fileSeenAgo: s.fileSeenAt ? Math.round((Date.now() - s.fileSeenAt) / 1000) : null,
+      transcript: s.transcriptPath?.split('/').pop(),
     }))
   }
 
@@ -227,6 +260,15 @@ export class SessionRegistry extends EventEmitter {
     s.name = s.customName ? `${base} · ${s.customName}` : base
   }
 
+  /** Give a session a pane (from a header or the session file) and reset the loss debounce. */
+  private assignPane(s: Session, pane: string): void {
+    if (s.pane !== pane) this.markChanged(s.id)
+    s.pane = pane
+    s.paneMisses = 0
+    s.paneLost = false
+    this.dropTmuxDuplicate(pane, s.id)
+  }
+
   private refreshTranscript(s: Session, force = false): void {
     if (!s.transcriptPath) return
     let mtime: number
@@ -262,10 +304,10 @@ export class SessionRegistry extends EventEmitter {
     if (s.source === 'tmux' && s.status !== 'needs_permission') {
       s.tool = info.pendingTool
     }
-    // Sessions without hook events (started before the hooks were installed)
-    // and without a pane: the transcript is the only status signal, so
-    // re-derive on every refresh instead of once.
-    if (s.source === 'hook' && !s.pane && !s.lastHookAt && s.status !== 'ended') {
+    // Sessions without hook events (started before the hooks were installed),
+    // without a pane and without a session file: the transcript is the only
+    // status signal, so re-derive on every refresh instead of once.
+    if (s.source === 'hook' && !s.pane && !s.lastHookAt && s.fileStatus === undefined && s.status !== 'ended') {
       const active = (s.transcriptMtime ?? 0) > Date.now() - TRANSCRIPT_ACTIVE_MS
       if (info.pendingTool && active) {
         s.tool = info.pendingTool
@@ -280,12 +322,24 @@ export class SessionRegistry extends EventEmitter {
     this.markChanged(s.id)
   }
 
+  /**
+   * Learn the claude pid from a post's ancestor chain. The same session id
+   * comes back with a new process after `claude -c` / `--resume`, so a stored
+   * pid that the chain does not contain is re-resolved — never keep a dead one
+   * (it would mark the live session ended on every scan).
+   */
   private notePid(s: Session, meta: Meta): void {
     s.lastSeen = Date.now()
-    if (s.pid || !meta.ancestors?.length) return
-    void claudePidAmong(meta.ancestors).then(pid => {
-      if (pid) s.pid = pid
-    })
+    const anc = meta.ancestors ?? []
+    if (!anc.length) return
+    if (s.pid !== undefined && anc.includes(s.pid)) return
+    const replaced = s.pid !== undefined
+    if (replaced && !pidAlive(s.pid!)) s.pid = undefined
+    claudePidAmong(anc, replaced)
+      .then(pid => {
+        if (pid) s.pid = pid
+      })
+      .catch(() => {})
   }
 
   // ───────────────────────── hooks ─────────────────────────
@@ -301,16 +355,17 @@ export class SessionRegistry extends EventEmitter {
     })
     s.lastHookAt = Date.now()
     this.notePid(s, meta)
+    s.inTmux = meta.tmuxPane !== undefined
     if (p.cwd && !s.cwd) s.cwd = p.cwd
     if (!s.name || s.name === id.slice(0, 8)) this.setName(s)
-    if (meta.tmuxPane) s.pane = meta.tmuxPane
-    // A synthetic tmux session for the same pane is now redundant.
-    if (s.pane) this.dropTmuxDuplicate(s.pane, id)
+    if (meta.tmuxPane) this.assignPane(s, meta.tmuxPane)
 
     switch (ev) {
       case 'SessionStart':
         s.endedAt = undefined
         s.tool = undefined
+        s.paneMisses = 0
+        s.paneLost = false
         this.touch(s, p.source === 'resume' || p.source === 'startup' ? 'idle' : s.status === 'unknown' ? 'idle' : s.status)
         this.refreshTranscript(s, true)
         break
@@ -402,6 +457,7 @@ export class SessionRegistry extends EventEmitter {
     const isNew = !this.sessions.has(id)
     const s = this.upsert(id, { cwd: p.cwd, transcriptPath: p.transcript_path, source: 'hook' })
     this.notePid(s, meta)
+    s.inTmux = meta.tmuxPane !== undefined
     if (s.status === 'ended') {
       // It is posting again → it is alive after all (e.g. resumed).
       s.endedAt = undefined
@@ -411,10 +467,7 @@ export class SessionRegistry extends EventEmitter {
       s.projectDir = p.workspace.project_dir
       this.setName(s)
     } else if (isNew) this.setName(s)
-    if (meta.tmuxPane) {
-      s.pane = meta.tmuxPane
-      this.dropTmuxDuplicate(s.pane, id)
-    }
+    if (meta.tmuxPane) this.assignPane(s, meta.tmuxPane)
     if (!s.transcriptPath && p.transcript_path) s.transcriptPath = p.transcript_path
     if (p.model?.display_name) s.model = shortModel(p.model.display_name)
     else if (p.model?.id) s.model = shortModel(p.model.id)
@@ -428,6 +481,110 @@ export class SessionRegistry extends EventEmitter {
     this.markChanged(id)
   }
 
+  // ───────────────────────── session files ─────────────────────────
+
+  /** React to Claude Code rewriting ~/.claude/sessions within a scan interval. */
+  private watchSessionFiles(): void {
+    const dir = sessionFilesDir(this.cfg.claudeConfigDir)
+    try {
+      fs.mkdirSync(dir, { recursive: true })
+      this.fileWatcher = fs.watch(dir, { persistent: false }, () => {
+        if (this.fileWatchTimer) return
+        this.fileWatchTimer = setTimeout(() => {
+          this.fileWatchTimer = undefined
+          void this.scanTmux()
+        }, 400)
+      })
+      this.fileWatcher.on('error', () => {
+        this.fileWatcher = undefined
+      })
+    } catch {
+      /* the 4 s poll still covers it */
+    }
+  }
+
+  /**
+   * Fold Claude Code's own per-process session files into the registry. Runs
+   * every scan; a file whose pid is dead or is no longer a claude process is
+   * stale (crash/SIGKILL) and ignored. Throws TmuxScanError when `ps` fails.
+   */
+  private async scanSessionFiles(): Promise<void> {
+    const now = Date.now()
+    for (const f of readSessionFiles(this.cfg.claudeConfigDir)) {
+      if (!isInteractiveCli(f)) continue
+      if (!pidAlive(f.pid)) continue
+      if (!(await pidIsClaude(f.pid))) continue
+      this.applySessionFile(f, now)
+    }
+  }
+
+  private applySessionFile(f: ClaudeSessionFile, now: number): void {
+    const existing = this.sessions.get(f.sessionId)
+    const s = this.upsert(f.sessionId, { source: 'hook' })
+    if (!existing) {
+      s.cwd = f.cwd
+      this.setName(s)
+    }
+    s.lastSeen = now
+    s.fileSeenAt = now
+    if (s.pid !== f.pid) s.pid = f.pid
+    if (!s.cwd && f.cwd) {
+      s.cwd = f.cwd
+      this.setName(s)
+    }
+    const pane = paneFromTmuxRef(f.tmux)
+    if (pane) {
+      // The header (same process) wins while present; the file re-attaches after a loss.
+      if (!s.pane) this.assignPane(s, pane)
+    } else if (s.inTmux === undefined) {
+      s.inTmux = false
+    }
+    if (!s.transcriptPath && s.cwd) s.transcriptPath = transcriptPathFor(this.cfg.claudeConfigDir, s.cwd, f.sessionId)
+    if (f.name && f.nameSource && f.nameSource !== 'derived' && !s.customName) {
+      s.customName = f.name
+      this.setName(s)
+    }
+    if (s.status === 'ended') {
+      s.endedAt = undefined
+      s.tool = undefined
+      this.touch(s, 'unknown')
+    }
+    if (f.status) {
+      const at = f.statusUpdatedAt ?? f.updatedAt ?? now
+      const changed = s.fileStatus !== f.status || s.fileStatusAt !== at
+      s.fileStatus = f.status
+      s.fileStatusAt = at
+      // Hooks carry richer detail (tool, notice); the file only overrides when
+      // no hook event is newer than its status — i.e. hooks are missing/stale.
+      const hookNewer = s.lastHookAt !== undefined && s.lastHookAt + 1000 >= at
+      if (!hookNewer && (changed || s.status === 'unknown')) this.applyFileStatus(s, f)
+    } else if (s.status === 'unknown' && !existing) {
+      this.touch(s, 'idle')
+    }
+    if (!existing) this.refreshTranscript(s, true)
+  }
+
+  private applyFileStatus(s: Session, f: ClaudeSessionFile): void {
+    switch (f.status) {
+      case 'busy':
+        if (s.status === 'compacting') return
+        this.touch(s, 'working')
+        break
+      case 'shell':
+        if (!s.tool) s.tool = { name: 'shell', summary: 'command running' }
+        this.touch(s, 'working')
+        break
+      case 'waiting':
+        if (!s.tool) s.tool = { name: 'permission', summary: f.waitingFor ?? 'approval requested' }
+        this.touch(s, 'needs_permission')
+        break
+      case 'idle':
+        if (s.status !== 'idle') s.tool = undefined
+        this.touch(s, 'idle')
+        break
+    }
+  }
+
   // ───────────────────────── tmux discovery ─────────────────────────
 
   private dropTmuxDuplicate(pane: string, keepId: string): void {
@@ -439,7 +596,27 @@ export class SessionRegistry extends EventEmitter {
     }
   }
 
+  /** One scan at a time; a request during a scan runs one more afterwards. */
   private async scanTmux(): Promise<void> {
+    if (this.inflight) {
+      this.queued = true
+      await this.inflight
+      if (this.inflight) await this.inflight
+      return
+    }
+    this.inflight = this.runScan()
+    try {
+      await this.inflight
+    } finally {
+      this.inflight = undefined
+    }
+    if (this.queued) {
+      this.queued = false
+      await this.scanTmux()
+    }
+  }
+
+  private async runScan(): Promise<void> {
     try {
       await this.scanTmuxInner()
     } catch (err) {
@@ -451,92 +628,94 @@ export class SessionRegistry extends EventEmitter {
     }
   }
 
-  private lastScanErrorAt = 0
-
   private async scanTmuxInner(): Promise<void> {
-    let panes: TmuxPane[] = []
+    const now = Date.now()
+    // "No information" scans (ps or tmux failed) must not read as "no claude
+    // panes": that would drop every pane and turn claude panes into terminals.
+    let paneInfo = true
     try {
-      panes = await listPanes()
-      this.tmuxAvailable = true
-    } catch {
-      this.tmuxAvailable = false
+      await this.scanSessionFiles()
+    } catch (err) {
+      paneInfo = false
+      this.noteNoInfo(err as Error)
     }
+    let panes: TmuxPane[] = []
     const claudePanes: TmuxPane[] = []
-    for (const p of panes) {
+    if (paneInfo) {
       try {
-        if (await paneRunsClaude(p)) claudePanes.push(p)
-      } catch {
-        /* ignore */
+        this.tmuxAvailable = await hasTmux()
+        panes = this.tmuxAvailable ? await listPanesStrict() : []
+        for (const p of panes) if (await paneRunsClaude(p)) claudePanes.push(p)
+      } catch (err) {
+        paneInfo = false
+        this.noteNoInfo(err as Error)
       }
     }
     const paneIds = new Set(claudePanes.map(p => p.id))
-    const now = Date.now()
 
-    await this.syncTerminals(panes, paneIds)
+    if (paneInfo) {
+      await this.syncTerminals(panes, paneIds)
 
-    // Attach panes to hook sessions that lack one (match by cwd when unique).
-    for (const s of this.sessions.values()) {
-      if (s.kind === 'shell') continue // terminal rows are reconciled in syncTerminals
-      if (s.pane && !paneIds.has(s.pane)) {
-        // The pane no longer runs claude (or is gone). Two consecutive misses
-        // (the process table is cached) mean the session really exited.
-        s.paneMisses = (s.paneMisses ?? 0) + 1
-        if (s.paneMisses >= 3) {
-          // With a known pid the process is authoritative: a pane miss only
-          // means the pane went away (or a transient scan hiccup), not exit.
-          const alive = s.pid !== undefined && pidAlive(s.pid)
-          log(`session ${s.name} (${s.id.slice(0, 8)}): pane ${s.pane} no longer runs claude (claude panes: ${[...paneIds].join(',') || 'none'})${alive ? ', pid alive → pane dropped' : ' → ended'}`)
-          s.pane = undefined
-          if (!alive && s.source === 'hook' && s.status !== 'ended') {
-            s.endedAt = now
-            s.tool = undefined
-            this.touch(s, 'ended')
+      for (const s of this.sessions.values()) {
+        if (s.kind === 'shell') continue // terminal rows are reconciled in syncTerminals
+        if (s.pane && !paneIds.has(s.pane)) {
+          // The pane no longer runs claude (or is gone). Three consecutive
+          // misses (the process table is cached) mean the session really exited.
+          s.paneMisses = (s.paneMisses ?? 0) + 1
+          if (s.paneMisses >= 3) {
+            // With a known pid the process is authoritative: a pane miss only
+            // means the pane went away (or a transient scan hiccup), not exit.
+            const alive = s.pid !== undefined && pidAlive(s.pid)
+            if (!s.lastDropLogAt || now - s.lastDropLogAt > 60_000) {
+              s.lastDropLogAt = now
+              log(`session ${s.name} (${s.id.slice(0, 8)}): pane ${s.pane} no longer runs claude (claude panes: ${[...paneIds].join(',') || 'none'})${alive ? ', pid alive → pane dropped' : ' → ended'}`)
+            }
+            s.pane = undefined
+            s.paneMisses = 0
+            s.paneLost = true
+            if (!alive && s.source === 'hook' && s.status !== 'ended') {
+              s.endedAt = now
+              s.tool = undefined
+              this.touch(s, 'ended')
+            }
+            this.markChanged(s.id)
           }
-          this.markChanged(s.id)
+        } else if (s.pane) {
+          s.paneMisses = 0
         }
-      } else if (s.pane) {
-        s.paneMisses = 0
       }
-      if (!s.pane && s.source === 'hook' && s.status !== 'ended') {
-        const matches = claudePanes.filter(p => p.cwd === s.cwd && !this.paneClaimed(p.id))
-        if (matches.length === 1) {
-          s.pane = matches[0].id
-          this.dropTmuxDuplicate(s.pane, s.id)
-          this.markChanged(s.id)
+
+      // Create synthetic sessions for panes nobody claims. Their transcript is a
+      // guess (newest file for that cwd not owned by a hook session), re-checked
+      // every scan so a later hook/statusline registration can reclaim it.
+      const hookTranscripts = new Set<string>()
+      for (const s of this.sessions.values()) if (s.source === 'hook' && s.transcriptPath) hookTranscripts.add(s.transcriptPath)
+      for (const p of claudePanes) {
+        if (this.paneClaimed(p.id)) continue
+        const id = `tmux:${p.id}`
+        const known = new Set([...this.sessions.keys()])
+        const transcript = findTranscriptForCwd(this.cfg.claudeConfigDir, p.cwd, known) ?? undefined
+        const existing = this.sessions.get(id)
+        const seed: Partial<Session> = { cwd: p.cwd, pane: p.id, source: 'tmux' }
+        if (!existing || !existing.transcriptPath || hookTranscripts.has(existing.transcriptPath)) {
+          seed.transcriptPath = transcript && !hookTranscripts.has(transcript) ? transcript : undefined
+          seed.transcriptMtime = undefined
+          if (!seed.transcriptPath) {
+            seed.lastAssistant = ''
+            seed.lastLine = undefined
+            seed.tool = undefined
+          }
         }
+        const s = this.upsert(id, seed)
+        if (!existing) {
+          this.setName(s)
+          this.touch(s, 'idle')
+        }
+        this.refreshTranscript(s, !existing)
       }
     }
 
-    // Create synthetic sessions for panes nobody claims. Their transcript is a
-    // guess (newest file for that cwd not owned by a hook session), re-checked
-    // every scan so a later hook/statusline registration can reclaim it.
-    const hookTranscripts = new Set<string>()
-    for (const s of this.sessions.values()) if (s.source === 'hook' && s.transcriptPath) hookTranscripts.add(s.transcriptPath)
-    for (const p of claudePanes) {
-      if (this.paneClaimed(p.id)) continue
-      const id = `tmux:${p.id}`
-      const known = new Set([...this.sessions.keys()])
-      const transcript = findTranscriptForCwd(this.cfg.claudeConfigDir, p.cwd, known) ?? undefined
-      const existing = this.sessions.get(id)
-      const seed: Partial<Session> = { cwd: p.cwd, pane: p.id, source: 'tmux' }
-      if (!existing || !existing.transcriptPath || hookTranscripts.has(existing.transcriptPath)) {
-        seed.transcriptPath = transcript && !hookTranscripts.has(transcript) ? transcript : undefined
-        seed.transcriptMtime = undefined
-        if (!seed.transcriptPath) {
-          seed.lastAssistant = ''
-          seed.lastLine = undefined
-          seed.tool = undefined
-        }
-      }
-      const s = this.upsert(id, seed)
-      if (!existing) {
-        this.setName(s)
-        this.touch(s, 'idle')
-      }
-      this.refreshTranscript(s, !existing)
-    }
-
-    // Liveness + screen heuristics + housekeeping.
+    // Liveness + screen heuristics + housekeeping (pid checks need no ps).
     for (const [id, s] of this.sessions) {
       if (s.kind === 'shell') continue
       if (s.status !== 'ended' && s.source === 'hook') {
@@ -550,7 +729,7 @@ export class SessionRegistry extends EventEmitter {
           this.touch(s, 'ended')
         }
       }
-      if (s.status === 'ended' && s.endedAt && now - s.endedAt > (s.pid || s.paneMisses ? 20_000 : ENDED_TTL_MS)) {
+      if (s.status === 'ended' && s.endedAt && now - s.endedAt > (s.pid || s.paneLost ? 20_000 : ENDED_TTL_MS)) {
         this.sessions.delete(id)
         this.markChanged(id)
         continue
@@ -560,12 +739,20 @@ export class SessionRegistry extends EventEmitter {
         this.markChanged(id)
         continue
       }
-      if (s.pane) await this.applyScreenHeuristics(s)
+      if (s.pane) await this.applyScreenHeuristics(s, now)
       if (s.source === 'tmux') this.refreshTranscript(s)
     }
     if (this.changed.size === 0 && now % 60000 < this.cfg.tmuxScanIntervalMs) {
       // periodic heartbeat so ages refresh on the glasses
       this.emit('change', [])
+    }
+  }
+
+  private noteNoInfo(err: Error): void {
+    const now = Date.now()
+    if (now - this.lastNoInfoLogAt > 60_000) {
+      this.lastNoInfoLogAt = now
+      log(`scan skipped (no pane information): ${err instanceof TmuxScanError ? err.message : err.message}`)
     }
   }
 
@@ -616,8 +803,14 @@ export class SessionRegistry extends EventEmitter {
     }
   }
 
-  private async applyScreenHeuristics(s: Session): Promise<void> {
-    if (!s.pane) return
+  /**
+   * Screen regexes are the weakest signal: they only fill in when hooks and
+   * the session file have nothing recent to say, except that a visible dialog
+   * still promotes a session to needs_permission (the hook may be missing in
+   * some permission paths).
+   */
+  private async applyScreenHeuristics(s: Session, now: number): Promise<void> {
+    if (!s.pane || s.status === 'ended') return
     let rows: string[]
     try {
       rows = await capturePane(s.pane, 25)
@@ -627,8 +820,13 @@ export class SessionRegistry extends EventEmitter {
     s.screenTail = rows
     const tail = rows.slice(-14).join('\n')
     const permission = PERMISSION_RX.test(tail)
-    const working = WORKING_RX.test(tail)
+    const working = WORKING_RX.test(rows.join('\n'))
+    const hookFresh = s.lastHookAt !== undefined && now - s.lastHookAt < HOOK_FRESH_MS
+    const fileFresh = s.fileStatus !== undefined && s.fileSeenAt !== undefined && now - s.fileSeenAt < FILE_FRESH_MS
     if (permission && s.status !== 'needs_permission') {
+      // A fresh hook event or a session file that is not "waiting" outranks a
+      // tail that merely looks like a dialog.
+      if (hookFresh || (fileFresh && s.fileStatus !== 'waiting')) return
       if (!s.tool) s.tool = { name: 'permission', summary: guessPermissionSummary(rows) }
       this.touch(s, 'needs_permission')
     } else if (!permission && s.status === 'needs_permission' && s.source === 'tmux') {
@@ -636,11 +834,13 @@ export class SessionRegistry extends EventEmitter {
     } else if (s.source === 'tmux' && s.status !== 'needs_permission') {
       const next: SessionStatus = working ? 'working' : 'idle'
       if (next !== s.status) this.touch(s, next)
-    } else if (s.source === 'hook' && s.status === 'needs_permission' && !permission && Date.now() - s.statusSince > 8000) {
+    } else if (s.source === 'hook' && s.status === 'needs_permission' && !permission && now - s.statusSince > 8000) {
       // Hook said "needs permission" but the screen no longer shows a dialog
-      // (user answered in the terminal). Fall back to working/idle.
+      // (user answered in the terminal). Fall back to working/idle — unless
+      // Claude itself still says it is waiting.
+      if (fileFresh && s.fileStatus === 'waiting') return
       this.touch(s, working ? 'working' : 'idle')
-    } else if (s.source === 'hook' && s.status === 'unknown') {
+    } else if (s.source === 'hook' && s.status === 'unknown' && !fileFresh) {
       // Known only from the statusline so far — the screen is our best signal.
       this.touch(s, working ? 'working' : 'idle')
     }

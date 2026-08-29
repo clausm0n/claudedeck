@@ -121,6 +121,25 @@ function entryIsOurs(entry: HookEntry): boolean {
   return (entry.hooks ?? []).some(h => typeof h.command === 'string' && h.command.includes(MARKER))
 }
 
+/** The exact hook command installHooks writes for an event (doctor compares against it). */
+export function hookCommand(ev: string): string {
+  return `${shellQuote(hookScriptPath())} ${ev}`
+}
+
+/** The exact statusline command installHooks writes. */
+export function statuslineCommand(): string {
+  return shellQuote(statuslineScriptPath())
+}
+
+/** Our hook entries for `ev` in a parsed settings.json, if any. */
+export function ourHookCommands(settings: Record<string, unknown>, ev: string): string[] {
+  const hooks = (settings.hooks as Record<string, HookEntry[]> | undefined) ?? {}
+  return (hooks[ev] ?? [])
+    .filter(entryIsOurs)
+    .flatMap(e => e.hooks.filter(h => typeof h.command === 'string' && (h.command as string).includes(MARKER)))
+    .map(h => `${h.command as string}${h.async === true ? '' : ' [not async]'}`)
+}
+
 function shellQuote(p: string): string {
   return /[\s'"$`\\]/.test(p) ? `'${p.replace(/'/g, `'\\''`)}'` : p
 }

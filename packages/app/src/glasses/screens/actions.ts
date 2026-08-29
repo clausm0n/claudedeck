@@ -113,7 +113,7 @@ export class ActionsScreen implements Screen {
     const s = this.ctx.fleet.get(this.key)
     const items = this.items()
     if (this.cursor >= items.length) this.cursor = Math.max(0, items.length - 1)
-    const header = fit(`${s?.name ?? ''}  actions${s?.pane ? '' : '  (no tmux pane - read only)'}`, LINE_W)
+    const header = fit(`${s?.name ?? ''}  actions${s?.pane ? '' : '  (read only: not under tmux - relaunch claude in a new shell)'}`, LINE_W)
     const rows = items.slice(this.top, this.top + BODY_LINES).map((it, i) => fit(`${this.top + i === this.cursor ? '>' : ' '} ${it.label}`, LINE_W))
     const footer = fit('swipe: select   tap: run   double-tap: back', LINE_W)
     return { header, body: rows.join('\n'), footer }

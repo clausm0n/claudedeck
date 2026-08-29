@@ -1,4 +1,4 @@
-import type { SessionAction, SessionDetail, SessionSummary } from '@claudedeck/shared'
+import type { RemoteInfo, SessionAction, SessionDetail, SessionSummary } from '@claudedeck/shared'
 import { sortSessions } from '@claudedeck/shared'
 import { Emitter } from '../util/emitter'
 import { BridgeClient, type BridgeEntry, type ConnState } from './client'
@@ -26,6 +26,8 @@ export interface FleetEvents {
   detail: FleetDetail
   transcript: { key?: string; text: string; raw?: string; seconds: number }
   ack: { bridgeId: string; of: string; ok: boolean; message?: string }
+  /** A bridge answered the current subscription with an error (session gone, remote unreachable). */
+  detailError: { key: string; message: string }
   log: string
 }
 
@@ -60,7 +62,10 @@ export class Fleet extends Emitter<FleetEvents> {
       })
       c.on('transcript', t => this.emit('transcript', { key: t.sessionId ? `${e.id}/${t.sessionId}` : undefined, text: t.text, raw: t.raw, seconds: t.seconds }))
       c.on('ack', a => this.emit('ack', { bridgeId: e.id, ...a }))
-      c.on('error', m => this.emit('log', `${e.name}: ${m}`))
+      c.on('error', m => {
+        this.emit('log', `${e.name}: ${m}`)
+        if (this.subscribedKey?.startsWith(`${e.id}/`)) this.emit('detailError', { key: this.subscribedKey, message: m })
+      })
       this.clients.set(e.id, c)
       c.connect()
     }
@@ -141,19 +146,37 @@ export class Fleet extends Emitter<FleetEvents> {
     return this.clientFor(key)?.sttAvailable ?? false
   }
 
-  /** Every open bridge, plus every machine seen through it (relayed remotes). */
+  /** Every open bridge with tmux, plus every relayed machine that can actually open a terminal. */
   terminalTargets(): TerminalTarget[] {
     const out: TerminalTarget[] = []
     const seen = new Set<string>()
+    const add = (bridgeId: string, machine: string) => {
+      const k = `${bridgeId}/${machine}`
+      if (seen.has(k)) return
+      seen.add(k)
+      out.push({ bridgeId, machine })
+    }
     for (const [id, c] of this.clients) {
-      if (c.state !== 'open' || !c.tmux) continue
-      const machines = [c.machine, ...c.sessions.map(s => s.machine)]
-      for (const m of machines) {
-        const k = `${id}/${m}`
-        if (seen.has(k)) continue
-        seen.add(k)
-        out.push({ bridgeId: id, machine: m })
+      if (c.state !== 'open') continue
+      if (c.remotesKnown) {
+        if (c.tmux) add(id, c.machine)
+        for (const r of c.remotes) if (r.canTerminal) add(id, r.machine)
+      } else if (c.tmux) {
+        // Hub older than 0.4.0: it never says what it relays, so infer machines
+        // from the session rows (an idle remote then has no row, and an old
+        // remote gets one it cannot honour).
+        for (const m of [c.machine, ...c.sessions.map(s => s.machine)]) add(id, m)
       }
+    }
+    return out
+  }
+
+  /** Relayed bridges too old for terminals / ctrl-c / kill, so the list can say why those are missing. */
+  outdatedRemotes(): Array<{ bridgeId: string; remote: RemoteInfo }> {
+    const out: Array<{ bridgeId: string; remote: RemoteInfo }> = []
+    for (const [id, c] of this.clients) {
+      if (c.state !== 'open') continue
+      for (const r of c.remotes) if (r.state === 'open' && r.outdated) out.push({ bridgeId: id, remote: r })
     }
     return out
   }

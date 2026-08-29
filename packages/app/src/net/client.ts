@@ -1,4 +1,4 @@
-import type { ClientMessage, ServerMessage, SessionAction, SessionDetail, SessionSummary } from '@claudedeck/shared'
+import type { ClientMessage, RemoteInfo, ServerMessage, SessionAction, SessionDetail, SessionSummary } from '@claudedeck/shared'
 import { PROTOCOL_VERSION } from '@claudedeck/shared'
 import { Emitter } from '../util/emitter'
 
@@ -32,6 +32,10 @@ export class BridgeClient extends Emitter<ClientEvents> {
   sttAvailable = false
   tmux = false
   sessions: SessionSummary[] = []
+  /** Bridges this one relays (hub mode), with what each can do. */
+  remotes: RemoteInfo[] = []
+  /** True once the bridge said what it relays — hubs older than 0.4.0 never do. */
+  remotesKnown = false
   lastError = ''
 
   private ws: WebSocket | null = null
@@ -40,7 +44,7 @@ export class BridgeClient extends Emitter<ClientEvents> {
   private pingTimer: number | null = null
   private closedByUser = false
   private subscribed: string | null = null
-  private screenWaiters: Array<(lines: string[]) => void> = []
+  private screenWaiters: Array<{ ok: (lines: string[]) => void; fail: (err: Error) => void }> = []
   private terminalWaiters: Array<(a: { ok: boolean; message?: string }) => void> = []
   private lastMessageAt = 0
   private stallTimer: number | null = null
@@ -128,6 +132,7 @@ export class BridgeClient extends Emitter<ClientEvents> {
       clearTimeout(connectTimer)
       if (this.ws === ws) this.ws = null
       this.clearTimers()
+      this.failWaiters('disconnected')
       this.setState('closed')
       if (!this.closedByUser) this.scheduleReconnect()
     }
@@ -162,9 +167,16 @@ export class BridgeClient extends Emitter<ClientEvents> {
     this.state = s
     if (s !== 'open') {
       this.sessions = []
+      this.remotes = []
       this.emit('sessions', this.sessions)
     }
     this.emit('state', s)
+  }
+
+  /** Settle every in-flight screen/terminal request with a reason instead of letting it time out. */
+  private failWaiters(message: string): void {
+    this.screenWaiters.splice(0).forEach(w => w.fail(new Error(message)))
+    this.terminalWaiters.splice(0).forEach(fn => fn({ ok: false, message }))
   }
 
   private handle(msg: ServerMessage): void {
@@ -173,17 +185,19 @@ export class BridgeClient extends Emitter<ClientEvents> {
         this.machine = msg.machine || this.entry.name
         this.sttAvailable = msg.stt.available
         this.tmux = msg.tmux
+        this.noteRemotes(msg.remotes)
         break
       case 'sessions':
         // Relayed sessions already carry their origin machine; keep it.
         this.sessions = msg.sessions.map(s => ({ ...s, machine: s.machine || this.machine }))
+        this.noteRemotes(msg.remotes)
         this.emit('sessions', this.sessions)
         break
       case 'session':
         this.emit('detail', { ...msg.session, machine: msg.session.machine || this.machine })
         break
       case 'screen':
-        this.screenWaiters.splice(0).forEach(fn => fn(msg.lines))
+        this.screenWaiters.splice(0).forEach(w => w.ok(msg.lines))
         break
       case 'transcript':
         this.emit('transcript', { sessionId: msg.sessionId, text: msg.text, raw: msg.raw, seconds: msg.seconds })
@@ -194,11 +208,21 @@ export class BridgeClient extends Emitter<ClientEvents> {
         break
       case 'error':
         this.lastError = msg.message
+        // The bridge answers a failed screen (or, on old hubs, a failed forward)
+        // with an error rather than an ack: hand the reason to whoever is
+        // waiting instead of showing "timeout" 6 s later.
+        this.failWaiters(msg.message)
         this.emit('error', msg.message)
         break
       case 'pong':
         break
     }
+  }
+
+  private noteRemotes(remotes?: RemoteInfo[]): void {
+    if (!remotes) return
+    this.remotes = remotes
+    this.remotesKnown = true
   }
 
   send(msg: ClientMessage): boolean {
@@ -229,14 +253,20 @@ export class BridgeClient extends Emitter<ClientEvents> {
     return new Promise((resolve, reject) => {
       if (!this.send({ type: 'screen', sessionId, lines })) return reject(new Error('not connected'))
       const timer = window.setTimeout(() => {
-        this.screenWaiters = this.screenWaiters.filter(fn => fn !== done)
+        this.screenWaiters = this.screenWaiters.filter(w => w !== waiter)
         reject(new Error('screen timeout'))
       }, 6000)
-      const done = (lines: string[]) => {
-        clearTimeout(timer)
-        resolve(lines)
+      const waiter = {
+        ok: (lines: string[]) => {
+          clearTimeout(timer)
+          resolve(lines)
+        },
+        fail: (err: Error) => {
+          clearTimeout(timer)
+          reject(err)
+        },
       }
-      this.screenWaiters.push(done)
+      this.screenWaiters.push(waiter)
     })
   }
 

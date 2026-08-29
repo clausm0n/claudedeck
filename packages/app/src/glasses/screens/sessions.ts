@@ -7,7 +7,7 @@ import type { Screen, ScreenContext } from '../ui'
 import { SessionScreen } from './session'
 import { HiddenScreen } from './hidden'
 
-type Row = { kind: 'session'; s: FleetSession } | { kind: 'new'; t: TerminalTarget }
+type Row = { kind: 'session'; s: FleetSession } | { kind: 'new'; t: TerminalTarget } | { kind: 'note'; text: string; detail: string }
 
 /** Root screen: every Claude Code session and terminal across every bridge, plus "new terminal" rows. */
 export class SessionsScreen implements Screen {
@@ -21,6 +21,14 @@ export class SessionsScreen implements Screen {
 
   private rows(): Row[] {
     const rows: Row[] = this.ctx.fleet.sessions.map(s => ({ kind: 'session', s }))
+    // A relayed bridge that is too old gets a note instead of a "+ new terminal" row it cannot honour.
+    for (const { remote } of this.ctx.fleet.outdatedRemotes()) {
+      rows.push({
+        kind: 'note',
+        text: `${remote.name} outdated (claudedeck ${remote.version ?? '?'})`,
+        detail: `${remote.name} runs claudedeck ${remote.version ?? '?'}: terminals, ctrl-c and kill need a newer bridge - run claudedeck update on ${remote.name}`,
+      })
+    }
     for (const t of this.ctx.fleet.terminalTargets()) rows.push({ kind: 'new', t })
     return rows
   }
@@ -53,6 +61,10 @@ export class SessionsScreen implements Screen {
     if (!r) return
     if (r.kind === 'session') {
       this.ctx.ui.push(new SessionScreen(this.ctx, r.s.key))
+      return
+    }
+    if (r.kind === 'note') {
+      this.ctx.ui.toast(r.detail, 6000)
       return
     }
     if (this.opening) return
@@ -127,6 +139,10 @@ export class SessionsScreen implements Screen {
           out.push(fit(`${cur} + new terminal${fleet.multiMachine || fleet.terminalTargets().length > 1 ? ` @${r.t.machine}` : ''}`, LINE_W))
           continue
         }
+        if (r.kind === 'note') {
+          out.push(fit(`${cur} ! ${r.text}`, LINE_W))
+          continue
+        }
         const s = r.s
         const age = formatAge(s.statusSince, now)
         const multi = fleet.multiMachine ? `@${s.machine} ` : ''
@@ -154,8 +170,9 @@ export class SessionsScreen implements Screen {
     }
 
     const more = rows.length > BODY_LINES ? ` ${this.cursor + 1}/${rows.length}` : ''
-    const onNew = rows[this.cursor]?.kind === 'new'
-    const footer = fit(`swipe: select${more}  tap: ${onNew ? 'open new terminal' : 'open'}  hold: hide  tap+hold: menu  2x: exit`, LINE_W)
+    const kind = rows[this.cursor]?.kind
+    const tap = kind === 'new' ? 'open new terminal' : kind === 'note' ? 'details' : 'open'
+    const footer = fit(`swipe: select${more}  tap: ${tap}  hold: hide  tap+hold: menu  2x: exit`, LINE_W)
     return { header, body, footer }
   }
 }

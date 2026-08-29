@@ -48,8 +48,18 @@ export interface BridgeConfig {
 /** Override with CLAUDEDECK_HOME to run a second instance (tests, staging). */
 export const CONFIG_DIR = process.env.CLAUDEDECK_HOME || path.join(os.homedir(), '.claudedeck')
 export const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json')
+export const CONFIG_BACKUP_PATH = `${CONFIG_PATH}.bak`
 export const MODELS_DIR = path.join(CONFIG_DIR, 'models')
 export const LOG_PATH = path.join(CONFIG_DIR, 'bridge.log')
+
+/**
+ * Set when loadConfig() had to mint a fresh token although this machine was
+ * already set up (service or hooks present): the phone pairing and any hub
+ * `remotes[].url` embedding the old token are now broken. `claudedeck start`
+ * logs it and the CLI prints it, since a silent new token only shows up as a
+ * reconnect loop.
+ */
+export let freshTokenWarning: string | undefined
 
 function defaults(): BridgeConfig {
   return {
@@ -79,22 +89,61 @@ function defaults(): BridgeConfig {
 export function loadConfig(): BridgeConfig {
   const base = defaults()
   if (!fs.existsSync(CONFIG_PATH)) {
+    // A lost config.json on an installed machine is recoverable from the backup.
+    if (fs.existsSync(CONFIG_BACKUP_PATH)) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(CONFIG_BACKUP_PATH, 'utf8')) as Partial<BridgeConfig>
+        const merged = merge(base, raw)
+        saveConfig(merged)
+        console.error(`claudedeck: ${CONFIG_PATH} was missing — restored from ${CONFIG_BACKUP_PATH}`)
+        return merged
+      } catch {
+        /* fall through to a fresh config */
+      }
+    }
     fs.mkdirSync(CONFIG_DIR, { recursive: true })
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(base, null, 2) + '\n', { mode: 0o600 })
+    if (previouslyInstalled(base.claudeConfigDir)) {
+      freshTokenWarning =
+        `${CONFIG_PATH} was missing and a NEW token was generated — the phone pairing and every hub ` +
+        `\`claudedeck remote add\` URL for this machine are now stale. Re-pair (claudedeck pair) and re-add this remote on the hub.`
+      console.error(`claudedeck: ${freshTokenWarning}`)
+    }
     return base
   }
   const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) as Partial<BridgeConfig>
-  const merged: BridgeConfig = {
-    ...base,
-    ...raw,
-    stt: { ...base.stt, ...(raw.stt ?? {}) },
-  }
+  const merged = merge(base, raw)
   // Persist any newly-added defaults so the file stays self-documenting.
   if (JSON.stringify(merged) !== JSON.stringify(raw)) saveConfig(merged)
   return merged
 }
 
+function merge(base: BridgeConfig, raw: Partial<BridgeConfig>): BridgeConfig {
+  return { ...base, ...raw, stt: { ...base.stt, ...(raw.stt ?? {}) } }
+}
+
+/** Hooks or a launchd plist exist → this machine was set up before, so a fresh token is a loss, not a first run. */
+function previouslyInstalled(claudeDir: string): boolean {
+  try {
+    if (fs.existsSync(path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.claudedeck.bridge.plist'))) return true
+    return fs.readFileSync(path.join(claudeDir, 'settings.json'), 'utf8').includes('claudedeck-hook')
+  } catch {
+    return false
+  }
+}
+
 export function saveConfig(cfg: BridgeConfig): void {
   fs.mkdirSync(CONFIG_DIR, { recursive: true })
+  // Keep the previous file: it holds the token and remote URLs that pairing depends on.
+  try {
+    if (fs.existsSync(CONFIG_PATH)) fs.copyFileSync(CONFIG_PATH, CONFIG_BACKUP_PATH)
+  } catch {
+    /* best effort */
+  }
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 })
+  try {
+    fs.chmodSync(CONFIG_BACKUP_PATH, 0o600)
+  } catch {
+    /* best effort */
+  }
 }

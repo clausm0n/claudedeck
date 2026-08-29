@@ -21,6 +21,14 @@ export class RawScreen implements Screen {
   }
 
   private async load(): Promise<void> {
+    const s = this.ctx.fleet.get(this.key)
+    if (s && !s.pane) {
+      // Nothing to capture: skip the round trip (and a 6 s wait on old hubs).
+      this.lines = []
+      this.status = 'no tmux pane (read-only)'
+      this.ctx.ui.redraw(true)
+      return
+    }
     try {
       const lines = await this.ctx.fleet.screen(this.key, 80)
       // Drop trailing empty rows so the prompt sits at the bottom.

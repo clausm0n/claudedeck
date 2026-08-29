@@ -96,6 +96,21 @@ export type ClientMessage =
   | { type: 'audio_cancel' }
   | { type: 'ping' }
 
+/** A bridge relayed by a hub, as the hub advertises it (absent on hubs older than 0.4.0). */
+export interface RemoteInfo {
+  /** Name the hub's owner gave the remote — the `machine` its sessions carry. */
+  name: string
+  machine: string
+  state: 'connecting' | 'open' | 'closed'
+  /** The remote bridge's version from its hello, once seen. */
+  version?: string
+  tmux: boolean
+  /** Too old for terminal_new / ctrl_c / kill; the hub answers those with an update hint. */
+  outdated: boolean
+  /** Open, has tmux and is new enough: "+ new terminal @machine" will work. */
+  canTerminal: boolean
+}
+
 export type ServerMessage =
   | {
       type: 'hello'
@@ -104,8 +119,11 @@ export type ServerMessage =
       protocol: number
       stt: { available: boolean; backend: string }
       tmux: boolean
+      /** Relayed bridges (hub mode). Optional so old hubs / direct bridges still validate. */
+      remotes?: RemoteInfo[]
     }
-  | { type: 'sessions'; sessions: SessionSummary[] }
+  /** `remotes` rides along so capability changes reach the app without a new message type. */
+  | { type: 'sessions'; sessions: SessionSummary[]; remotes?: RemoteInfo[] }
   | { type: 'session'; session: SessionDetail }
   | { type: 'screen'; sessionId: string; lines: string[] }
   | { type: 'ack'; of: string; ok: boolean; message?: string }

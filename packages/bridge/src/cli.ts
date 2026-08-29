@@ -1,21 +1,29 @@
 #!/usr/bin/env node
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import QRCode from 'qrcode'
-import { CONFIG_DIR, CONFIG_PATH, MODELS_DIR, loadConfig, saveConfig } from './config.js'
+import { CONFIG_DIR, CONFIG_PATH, MODELS_DIR, freshTokenWarning, loadConfig, saveConfig } from './config.js'
 import { SessionRegistry } from './sessions.js'
 import { startServer } from './server.js'
 import { installHooks, uninstallHooks, HOOK_EVENTS } from './hooks-install.js'
 import { WHISPER_MODEL_URL, createStt } from './stt.js'
+import { installService, restartService, uninstallService } from './launchd.js'
+import { formatReport, runDoctor } from './doctor.js'
+import { healthUrlFor, repoRoot, updateLocal, updateRemote } from './update.js'
+import { appUrl, bestUrl, lanIp, tailscaleInfo, tailscaleServe } from './netinfo.js'
+import { VERSION } from './version.js'
 import { log } from './log.js'
 
 const [, , cmd = 'start', ...rest] = process.argv
 
-const HELP = `claudedeck — bridge between Claude Code sessions and the G2 glasses app
+const HELP = `claudedeck ${VERSION} — bridge between Claude Code sessions and the G2 glasses app
 
   claudedeck start                 run the bridge (WS + hook receiver)
+  claudedeck doctor [--json]       check node, config, launchd, bridge, hooks, wrapper, tmux, remotes, tailscale
+  claudedeck update                git pull + build + reinstall hooks/service (restarts the bridge)
+  claudedeck restart               restart the launchd service (loads it when not loaded)
+  claudedeck version               print the bridge version
   claudedeck install-hooks         add ClaudeDeck hooks (+ statusline if free) to ~/.claude/settings.json
   claudedeck uninstall-hooks       remove them again
   claudedeck info                  print connection details for the glasses app
@@ -23,11 +31,14 @@ const HELP = `claudedeck — bridge between Claude Code sessions and the G2 glas
   claudedeck pair [--open]         QR code the installed app scans (phone page → Scan QR); --open shows a crisp one in the browser
   claudedeck token [--rotate]      print (or rotate) the shared secret
   claudedeck setup-stt [model]     download a whisper.cpp model (default: base.en)
-  claudedeck install-service       create a launchd agent so the bridge runs at login (macOS)
+  claudedeck install-service       create/refresh the launchd agent (stable node path) and (re)start it (macOS)
+  claudedeck uninstall-service     stop and remove the launchd agent
   claudedeck status                list sessions the bridge currently sees
   claudedeck qr [--lan]            QR for the glasses app served by this bridge (Tailscale IP by default)
   claudedeck remote add <name> <ws-url> | rm <name> | ls
                                    relay another machine's bridge through this one (hub mode)
+  claudedeck remote update <name> --ssh user@host [--path ~/claudedeck]
+                                   git pull + build + reinstall on that machine over ssh
 
 Config: ${CONFIG_PATH}
 `
@@ -36,7 +47,8 @@ Config: ${CONFIG_PATH}
 // whisper-cli and node from Homebrew/nvm would be invisible. Prepend the usual
 // locations so child processes and hook scripts find them.
 function widenPath(): void {
-  const extra = ['/opt/homebrew/bin', '/usr/local/bin', `${os.homedir()}/.local/bin`, '/usr/bin', '/bin', '/usr/sbin', '/sbin']
+  const home = process.env.HOME ?? ''
+  const extra = ['/opt/homebrew/bin', '/usr/local/bin', `${home}/.local/bin`, '/usr/bin', '/bin', '/usr/sbin', '/sbin']
   const cur = (process.env.PATH ?? '').split(':').filter(Boolean)
   process.env.PATH = [...extra.filter(p => !cur.includes(p)), ...cur].join(':')
   // launchd gives a C locale; tmux sanitizes non-ASCII/non-printable output there.
@@ -49,6 +61,15 @@ async function main(): Promise<void> {
   const cfg = loadConfig()
   switch (cmd) {
     case 'start': {
+      // Crashes must land in bridge.log (launchd.err.log is easy to miss) and
+      // must still exit so launchd's KeepAlive restarts us with a clean registry.
+      const fatal = (kind: string) => (err: unknown) => {
+        log(`fatal ${kind}: ${err instanceof Error ? err.stack ?? err.message : String(err)}`)
+        setTimeout(() => process.exit(1), 200).unref()
+      }
+      process.on('uncaughtException', fatal('uncaught exception'))
+      process.on('unhandledRejection', fatal('unhandled rejection'))
+      if (freshTokenWarning) log(`WARNING: ${freshTokenWarning}`)
       const registry = new SessionRegistry(cfg)
       registry.start()
       const server = startServer(cfg, registry)
@@ -63,6 +84,29 @@ async function main(): Promise<void> {
       }
       process.on('SIGINT', shutdown)
       process.on('SIGTERM', shutdown)
+      return
+    }
+    case 'version':
+    case '--version':
+    case '-v':
+      console.log(VERSION)
+      return
+    case 'doctor': {
+      const report = await runDoctor(cfg)
+      if (rest.includes('--json')) console.log(JSON.stringify(report, null, 2))
+      else console.log(formatReport(report))
+      if (freshTokenWarning) console.error(`\nWARNING: ${freshTokenWarning}`)
+      process.exitCode = report.ok ? 0 : 1
+      return
+    }
+    case 'update': {
+      await updateLocal({ port: cfg.port, skipPull: rest.includes('--no-pull') })
+      return
+    }
+    case 'restart': {
+      const r = restartService()
+      console.log(r.message)
+      if (!r.ok) process.exitCode = 1
       return
     }
     case 'install-hooks': {
@@ -83,6 +127,7 @@ async function main(): Promise<void> {
       if (rest.includes('--rotate')) {
         cfg.token = (await import('node:crypto')).randomBytes(18).toString('base64url')
         saveConfig(cfg)
+        console.error('(token rotated — re-pair the phone with `claudedeck pair`, and re-add this remote on any hub: claudedeck remote add <name> <new url>)')
       }
       console.log(cfg.token)
       return
@@ -91,6 +136,7 @@ async function main(): Promise<void> {
       const ts = tailscaleInfo()
       const lan = lanIp()
       console.log(`machine : ${cfg.machine}`)
+      console.log(`version : ${VERSION}`)
       console.log(`port    : ${cfg.port}`)
       console.log(`token   : ${cfg.token}`)
       console.log('')
@@ -115,6 +161,8 @@ async function main(): Promise<void> {
       console.log(`Hooks installed: ${hooksInstalled(cfg.claudeConfigDir) ? 'yes' : 'no (run: claudedeck install-hooks)'}`)
       console.log(`Hook events: ${HOOK_EVENTS.length}`)
       console.log(`Remotes: ${cfg.remotes.length ? cfg.remotes.map(r => `${r.name} (${r.url.replace(/token=.*/, 'token=…')})`).join(', ') : 'none'}`)
+      console.log('')
+      console.log('Health check: claudedeck doctor')
       return
     }
     case 'url': {
@@ -164,6 +212,7 @@ async function main(): Promise<void> {
       if (sub === 'ls' || !sub) {
         if (!cfg.remotes.length) console.log('no remotes')
         for (const r of cfg.remotes) console.log(`${r.name.padEnd(16)} ${r.url.replace(/token=.*/, 'token=…')}`)
+        if (cfg.remotes.length) console.log('\n(versions and reachability: claudedeck doctor)')
         return
       }
       if (sub === 'add') {
@@ -171,16 +220,24 @@ async function main(): Promise<void> {
         if (!/^[a-z0-9_-]+$/i.test(name)) throw new Error('name must be alphanumeric/-/_')
         cfg.remotes = [...cfg.remotes.filter(r => r.name !== name), { name, url }]
         saveConfig(cfg)
-        console.log(`added remote ${name}. Restart the bridge to connect (launchctl kickstart -k gui/$(id -u)/com.claudedeck.bridge, or re-run claudedeck start).`)
+        console.log(`added remote ${name}. Restart the bridge to connect: claudedeck restart`)
         return
       }
       if (sub === 'rm') {
         cfg.remotes = cfg.remotes.filter(r => r.name !== name)
         saveConfig(cfg)
-        console.log(`removed remote ${name}`)
+        console.log(`removed remote ${name}. Restart the bridge to apply: claudedeck restart`)
         return
       }
-      throw new Error('usage: claudedeck remote add|rm|ls')
+      if (sub === 'update') {
+        const ssh = flagValue(rest, '--ssh')
+        if (!name || !ssh) throw new Error('usage: claudedeck remote update <name> --ssh user@host [--path ~/claudedeck]')
+        const entry = cfg.remotes.find(r => r.name === name)
+        if (!entry) console.error(`(no remote named ${name} in ${CONFIG_PATH} — updating ${ssh} anyway)`)
+        await updateRemote({ name, ssh, path: flagValue(rest, '--path'), healthUrl: entry ? healthUrlFor(entry.url) : undefined })
+        return
+      }
+      throw new Error('usage: claudedeck remote add|rm|ls|update')
     }
     case 'setup-stt': {
       const model = rest[0] ?? 'base.en'
@@ -220,34 +277,24 @@ async function main(): Promise<void> {
       return
     }
     case 'install-service': {
-      if (process.platform !== 'darwin') throw new Error('install-service currently supports macOS launchd only')
-      const label = 'com.claudedeck.bridge'
-      const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', `${label}.plist`)
-      const node = process.execPath
-      const cli = new URL(import.meta.url).pathname
-      const plist = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>${label}</string>
-  <key>ProgramArguments</key><array><string>${node}</string><string>${cli}</string><string>start</string></array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
-  <key>StandardOutPath</key><string>${path.join(os.homedir(), '.claudedeck', 'launchd.out.log')}</string>
-  <key>StandardErrorPath</key><string>${path.join(os.homedir(), '.claudedeck', 'launchd.err.log')}</string>
-</dict></plist>
-`
-      fs.mkdirSync(path.dirname(plistPath), { recursive: true })
-      fs.writeFileSync(plistPath, plist)
-      console.log(`wrote ${plistPath}`)
-      console.log(`load with:   launchctl load -w ${plistPath}`)
-      console.log(`unload with: launchctl unload ${plistPath}`)
+      const r = installService()
+      for (const m of r.messages) console.log(m)
+      if (!r.running) {
+        console.log(`\nNot running. Check: launchctl print gui/$(id -u)/com.claudedeck.bridge; tail ${path.join(CONFIG_DIR, 'launchd.err.log')}`)
+        process.exitCode = 1
+      } else {
+        console.log(`bridge ${VERSION} from ${repoRoot()} — verify with: claudedeck doctor`)
+      }
+      return
+    }
+    case 'uninstall-service': {
+      for (const m of uninstallService()) console.log(m)
       return
     }
     case 'status': {
       const res = await fetch(`http://127.0.0.1:${cfg.port}/sessions`).catch(() => null)
       if (!res || !res.ok) {
-        console.log('bridge not running (start it with: claudedeck start)')
+        console.log('bridge not running (start it with: claudedeck restart, or claudedeck start in the foreground; diagnose with: claudedeck doctor)')
         return
       }
       const sessions = (await res.json()) as Array<Record<string, unknown>>
@@ -257,14 +304,23 @@ async function main(): Promise<void> {
       }
       return
     }
-    default:
+    case 'help':
+    case '--help':
+    case '-h':
       console.log(HELP)
+      return
+    default:
+      if (cmd !== 'help') console.error(`unknown command: ${cmd}\n`)
+      console.log(HELP)
+      process.exitCode = cmd === 'help' ? 0 : 1
   }
 }
 
-function appUrl(host: string, cfg: { port: number; token: string }): string {
-  const bridge = `ws://${host}:${cfg.port}/ws?token=${cfg.token}`
-  return `http://${host}:${cfg.port}/app/?bridge=${encodeURIComponent(bridge)}`
+function flagValue(args: string[], flag: string): string | undefined {
+  const i = args.indexOf(flag)
+  if (i >= 0) return args[i + 1]
+  const eq = args.find(a => a.startsWith(`${flag}=`))
+  return eq?.slice(flag.length + 1)
 }
 
 function hooksInstalled(claudeDir: string): boolean {
@@ -276,77 +332,12 @@ function hooksInstalled(claudeDir: string): boolean {
   }
 }
 
-function tailscaleInfo(): { ip?: string; dns?: string } {
-  const bins = ['tailscale', '/opt/homebrew/bin/tailscale', '/Applications/Tailscale.app/Contents/MacOS/Tailscale']
-  for (const b of bins) {
-    try {
-      const ip = execFileSync(b, ['ip', '-4'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim().split('\n')[0]
-      let dns: string | undefined
-      try {
-        const st = JSON.parse(execFileSync(b, ['status', '--json'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString())
-        dns = (st?.Self?.DNSName as string | undefined)?.replace(/\.$/, '')
-      } catch {
-        /* ignore */
-      }
-      return { ip, dns }
-    } catch {
-      /* try next */
-    }
-  }
-  return {}
-}
-
-/** The URL the app should use: Tailscale Serve (wss) when active, else ws:// on the Tailscale IP, else LAN. */
-function bestUrl(cfg: { port: number; token: string }, flags: string[]): { url: string; serve: boolean } {
-  const ts = tailscaleInfo()
-  const lan = lanIp()
-  const serve = tailscaleServe(cfg.port)
-  let base: string | undefined
-  if (flags.includes('--lan')) base = lan && `ws://${lan}:${cfg.port}`
-  else if (flags.includes('--ts') || flags.includes('--ws')) base = ts.ip && `ws://${ts.ip}:${cfg.port}`
-  else base = serve ?? (ts.ip ? `ws://${ts.ip}:${cfg.port}` : lan ? `ws://${lan}:${cfg.port}` : undefined)
-  if (!base) throw new Error('no usable address found (no Tailscale Serve, Tailscale IP or LAN IP)')
-  return { url: `${base}/ws?token=${cfg.token}`, serve: !!serve && base === serve }
-}
-
-/** `wss://<host>` when `tailscale serve` fronts this bridge's port with HTTPS, else undefined. */
-function tailscaleServe(port: number): string | undefined {
-  const bins = ['tailscale', '/opt/homebrew/bin/tailscale', '/Applications/Tailscale.app/Contents/MacOS/Tailscale']
-  for (const b of bins) {
-    try {
-      const st = JSON.parse(execFileSync(b, ['serve', 'status', '--json'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString()) as {
-        Web?: Record<string, { Handlers?: Record<string, { Proxy?: string }> }>
-      }
-      for (const [hostPort, site] of Object.entries(st.Web ?? {})) {
-        for (const h of Object.values(site.Handlers ?? {})) {
-          if (h.Proxy && /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(h.Proxy) && new URL(h.Proxy).port === String(port)) {
-            return `wss://${hostPort.replace(/:443$/, '')}`
-          }
-        }
-      }
-      return undefined
-    } catch {
-      /* try next */
-    }
-  }
-  return undefined
-}
-
 function copyToClipboard(text: string): boolean {
   for (const [bin, args] of [['pbcopy', []], ['wl-copy', []], ['xclip', ['-selection', 'clipboard']]] as Array<[string, string[]]>) {
     const r = spawnSync(bin, args, { input: text, stdio: ['pipe', 'ignore', 'ignore'] })
     if (!r.error && r.status === 0) return true
   }
   return false
-}
-
-function lanIp(): string | undefined {
-  for (const [, addrs] of Object.entries(os.networkInterfaces())) {
-    for (const a of addrs ?? []) {
-      if (a.family === 'IPv4' && !a.internal && !a.address.startsWith('100.')) return a.address
-    }
-  }
-  return undefined
 }
 
 main().catch(err => {
