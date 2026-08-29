@@ -36,8 +36,8 @@ npm link -w @claudedeck/bridge   # puts `claudedeck` on your PATH (or: printf '#
 CLI=claudedeck
 
 $CLI install-hooks        # hooks + statusline into ~/.claude/settings.json (backup kept)
-$CLI install-service      # launchd agent: bridge runs at login and restarts if it dies
-launchctl load -w ~/Library/LaunchAgents/com.claudedeck.bridge.plist
+$CLI install-service      # launchd agent: bridge runs at login, restarts if it dies; loads/restarts it right away
+$CLI doctor               # one line per check (node, plist, launchd, hooks, tmux, remotes, tailscale) with fix hints
 $CLI setup-stt large-v3-turbo   # optional dictation (brew install whisper-cpp first)
 
 source scripts/claude-tmux.sh   # add to ~/.zshrc: every `claude` now runs in its own tmux pane (dies with its tab locally; kept over SSH — see below)
@@ -58,8 +58,10 @@ git clone https://github.com/clausm0n/claudedeck.git ~/claudedeck && cd ~/claude
 
 # on the hub:
 claudedeck remote add studiom3 ws://<remote-ip>:7788/ws?token=<remote token>
-launchctl kickstart -k gui/$(id -u)/com.claudedeck.bridge                            # restart to connect
+claudedeck restart                                                                  # reconnect with the new remote
 ```
+
+Keeping a remote current: `claudedeck remote update studiom3 --ssh user@host` runs `git pull`, build, `install-hooks` and `install-service` over SSH and waits for the remote's `/health` to report the new version (`claudedeck update` does the same on the machine itself). The hub reads every remote's version from its hello: a remote older than what a feature needs (terminals, Ctrl-C, kill need 0.3.0) gets an instant, actionable "update it" reply on the glasses instead of a timeout, `claudedeck doctor` flags it, and `/health` shows `outdated`/`canTerminal` per remote. Every forwarded request is answered — a remote that does not understand a message, has gone quiet (the hub pings it and drops a stalled link after 50 s) or replies with an error produces an `ok:false` ack with the reason.
 
 Remote sessions appear in the same list tagged `@<machine>`; approvals, typed prompts, raw screen and dictation (transcribed on the hub) are forwarded. If the hub can only reach the remote via SSH, tunnel it: `ssh -N -L 7789:127.0.0.1:7788 user@remote` and add the remote as `ws://127.0.0.1:7789/ws?token=…`.
 
@@ -151,7 +153,10 @@ Row format on the Sessions screen: `> ? evenapp_G2 @machine NEEDS OK 12s  Bash: 
 | Hooks (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `Notification`, `Stop`, `SessionEnd`, …) | `bin/claudedeck-hook.sh` → `POST /hook` (async, never blocks Claude) | authoritative status transitions, current tool, `$TMUX_PANE` |
 | Statusline | `bin/claudedeck-statusline.sh` → `POST /statusline` | model, context %, session name — and it fires for sessions started *before* the hooks were installed |
 | Transcript | `~/.claude/projects/<slug>/<id>.jsonl` tail | last assistant text, last user prompt, pending tool |
-| tmux | `list-panes` + process tree, `capture-pane` | sessions with no hook data yet; screen heuristics (`esc to interrupt`, permission dialogs) |
+| Session files | `~/.claude/sessions/<pid>.json` (written by Claude Code ≥ 2.1: pid, cwd, tmux pane, `busy`/`idle`/`shell`/`waiting`) | instant recovery after a bridge restart; pane + status for sessions started before the hooks were installed |
+| tmux | `list-panes` + process tree, `capture-pane` | sessions with no hook data yet; screen heuristics (spinner rows, permission dialogs) |
+
+Precedence: a hook event (authoritative, and it outranks the screen for 15 s) → the session file → transcript mtime → screen regexes. A `ps`/tmux failure is treated as "no information" for that scan rather than "no Claude panes", so a hiccup never drops panes or ends sessions.
 
 The bridge listens on `0.0.0.0` but requires the token for anything except loopback (`/hook`, `/statusline`). `~/.claudedeck/config.json` holds `port`, `token`, `machine`, `stt`. Logs: `~/.claudedeck/bridge.log`.
 
@@ -159,9 +164,12 @@ The bridge listens on `0.0.0.0` but requires the token for anything except loopb
 
 ```
 claudedeck start | install-hooks [--no-statusline] | uninstall-hooks | info | token [--rotate] | qr [--lan]
-claudedeck setup-stt [large-v3-turbo|small.en|base.en|...] | install-service | status
-claudedeck remote add <name> <ws-url> | rm <name> | ls
+claudedeck setup-stt [large-v3-turbo|small.en|base.en|...] | install-service | uninstall-service | restart | status
+claudedeck doctor [--json] | update | version
+claudedeck remote add <name> <ws-url> | rm <name> | ls | update <name> --ssh user@host [--path ~/claudedeck]
 ```
+
+The launchd agent uses a stable node path (`/opt/homebrew/opt/node/bin/node`, not the versioned Cellar path) so `brew upgrade node` no longer breaks it, retries when the port is busy instead of crash-looping, rotates `bridge.log` at 5 MB and keeps `config.json.bak`. `launchd.err.log` only gets fatal errors.
 
 `GET /health`, `GET /sessions?token=…` are handy for debugging; the simulator can be driven with `--automation-port 9898` (`/api/screenshot/glasses`, `/api/input`).
 
